@@ -2,7 +2,7 @@ import math
 import threading
 
 import numpy as np
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 KEY_TO_CTRL_INDEX = {
     keyboard.KeyCode.from_char('d'): (0, +1),
@@ -20,12 +20,12 @@ KEY_TO_CTRL_INDEX = {
 }
 
 ANGULAR_KEYS = {
-    keyboard.KeyCode.from_char('7'): (0, -1),
-    keyboard.KeyCode.from_char('8'): (0, +1),
-    keyboard.KeyCode.from_char('9'): (1, +1),
-    keyboard.KeyCode.from_char('0'): (1, -1),
-    keyboard.KeyCode.from_char('-'): (2, -1),
-    keyboard.KeyCode.from_char('='): (2, +1),
+    keyboard.KeyCode.from_char('1'): (0, -1),
+    keyboard.KeyCode.from_char('2'): (0, +1),
+    keyboard.KeyCode.from_char('3'): (1, +1),
+    keyboard.KeyCode.from_char('4'): (1, -1),
+    keyboard.KeyCode.from_char('5'): (2, -1),
+    keyboard.KeyCode.from_char('6'): (2, +1),
 }
 
 SPECIAL_KEYS = {
@@ -34,25 +34,26 @@ SPECIAL_KEYS = {
     'quit': keyboard.Key.esc,
 }
 
-ctrl_lock   = threading.Lock()
-listener    = None
-nu          = 0
-
-ctrl_speed_per_sec      = np.zeros(0, dtype=float)
-pressed_dirs            = np.zeros(0, dtype=float)
-angular_velocity_cmd    = np.zeros(3, dtype=float)
-angular_speed           = math.radians(10.0)
-
+ctrl_lock = threading.Lock()
+listener = None
+mouse_listener = None
+nu = 0
+ctrl_speed_per_sec = np.zeros(0, dtype=float)
+pressed_dirs = np.zeros(0, dtype=float)
+angular_velocity_cmd = np.zeros(3, dtype=float)
+angular_speed = math.radians(10.0)
 flags = {'clear': False, 'reset': False, 'quit': False}
+mouse_position = None
 
 
-def setup(model, fraction=0.5, angular_deg_per_sec=60.0):
-    global nu, ctrl_speed_per_sec, pressed_dirs, angular_speed
+def setup(model, fraction=0.5, angular_deg_per_sec=10.0):
+    global nu, ctrl_speed_per_sec, pressed_dirs, angular_speed, mouse_position
 
     nu = model.nu
     ctrl_speed_per_sec = np.zeros(nu, dtype=float)
     pressed_dirs = np.zeros(nu, dtype=float)
     angular_speed = math.radians(float(angular_deg_per_sec))
+    mouse_position = None
 
     for i in range(nu):
         lo, hi = model.actuator_ctrlrange[i]
@@ -69,20 +70,25 @@ def setup(model, fraction=0.5, angular_deg_per_sec=60.0):
 
 
 def start_listener(suppress=True):
-    global listener
-    if listener is not None:
-        return
-    listener = keyboard.Listener(on_press=_on_press, on_release=_on_release, suppress=suppress)
-    listener.daemon = True
-    listener.start()
+    global listener, mouse_listener
+    if listener is None:
+        listener = keyboard.Listener(on_press=_on_press, on_release=_on_release, suppress=suppress)
+        listener.daemon = True
+        listener.start()
+    if mouse_listener is None:
+        mouse_listener = mouse.Listener(on_move=_on_move)
+        mouse_listener.daemon = True
+        mouse_listener.start()
 
 
 def stop_listener():
-    global listener
-    if listener is None:
-        return
-    listener.stop()
-    listener = None
+    global listener, mouse_listener
+    if listener is not None:
+        listener.stop()
+        listener = None
+    if mouse_listener is not None:
+        mouse_listener.stop()
+        mouse_listener = None
 
 
 def control_update(dt):
@@ -98,6 +104,11 @@ def check_flag(name):
             return False
         flags[name] = False
         return True
+
+
+def get_mouse_position():
+    with ctrl_lock:
+        return mouse_position
 
 
 def _on_press(key):
@@ -134,3 +145,9 @@ def _on_release(key):
         axis, _ = ANGULAR_KEYS[key]
         with ctrl_lock:
             angular_velocity_cmd[axis] = 0.0
+
+
+def _on_move(x, y):
+    global mouse_position
+    with ctrl_lock:
+        mouse_position = (x, y)
