@@ -31,6 +31,7 @@
         contype="0" 
         conaffinity="0"/>
        <site name="virtual_thruster" pos="0 0 0" euler="0 0 0" size="0.02" rgba="0 1 0 1"/>
+       <camera name="chase_onbody" mode="fixed" pos="-200 0 60" euler="0 0 0"/>
     </body>
   </worldbody>
 

@@ -23,7 +23,7 @@ def main():
     nu = model.nu
 
     if USE_MANUAL_CONTROL:
-        manual_controller.setup(model)
+        manual_controller.speed_control_setup(model)
         manual_controller.start_listener()
 
     next_report_time = time.time() + REPORT_PERIOD
@@ -31,6 +31,10 @@ def main():
     with mujoco.viewer.launch_passive(model, data) as viewer:
         viewer.cam.lookat[:] = data.body(body_id).xpos
         viewer.cam.distance = CAMERA_DISTANCE
+        # cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "chase_onbody")
+        # viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+        # viewer.cam.fixedcamid = cam_id
+        
 
         while viewer.is_running():
             step_start = time.time()
@@ -48,13 +52,14 @@ def main():
                     break
 
                 dt = float(model.opt.timestep)
-                update = manual_controller.control_update(dt)
-                if isinstance(update, tuple):
-                    ctrl_delta, ang_vel_cmd = update
-                else:
-                    ctrl_delta, ang_vel_cmd = update, None
-                _apply_control(model, data, nu, ctrl_delta)
-                _apply_angular_velocity(data, joint_adr, ang_vel_cmd)
+                update = manual_controller.control_update_speed(dt)
+                # if isinstance(update, tuple):
+                #     ctrl_delta, ang_vel_cmd = update
+                # else:
+                #     ctrl_delta, ang_vel_cmd = update, None
+                # _apply_control(model, data, nu, ctrl_delta)
+                # _apply_angular_velocity(data, joint_adr, ang_vel_cmd)
+                _apply_velocity(data, joint_adr, update, body_id)
 
             mujoco.mj_step(model, data)
             viewer.sync()
@@ -96,6 +101,13 @@ def _apply_angular_velocity(data, joint_adr, ang_vel_cmd):
     if end > data.qvel.size:
         return
     data.qvel[start:end] = ang_vel_cmd
+
+def _apply_velocity(data, joint_adr, vel_cmd, body_id):
+    R = data.xmat[body_id].reshape(3, 3)
+    v_world = R @ vel_cmd[:3]
+    omega_local = vel_cmd[3:6]
+    data.qvel[joint_adr:joint_adr+3] = v_world
+    data.qvel[joint_adr+3:joint_adr+6] = omega_local
 
 
 def _clamp_ctrl(model, data, nu):
