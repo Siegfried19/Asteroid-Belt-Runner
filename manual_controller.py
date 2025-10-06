@@ -1,3 +1,4 @@
+import math
 import threading
 
 import numpy as np
@@ -18,26 +19,40 @@ KEY_TO_CTRL_INDEX = {
     keyboard.KeyCode.from_char('6'): (5, +1),
 }
 
+ANGULAR_KEYS = {
+    keyboard.KeyCode.from_char('7'): (0, -1),
+    keyboard.KeyCode.from_char('8'): (0, +1),
+    keyboard.KeyCode.from_char('9'): (1, +1),
+    keyboard.KeyCode.from_char('0'): (1, -1),
+    keyboard.KeyCode.from_char('-'): (2, -1),
+    keyboard.KeyCode.from_char('='): (2, +1),
+}
+
 SPECIAL_KEYS = {
     'clear': keyboard.Key.space,
     'reset': keyboard.Key.backspace,
     'quit': keyboard.Key.esc,
 }
 
-ctrl_lock = threading.Lock()
-listener = None
-nu = 0
-ctrl_speed_per_sec = np.zeros(0, dtype=float)
-pressed_dirs = np.zeros(0, dtype=float)
+ctrl_lock   = threading.Lock()
+listener    = None
+nu          = 0
+
+ctrl_speed_per_sec      = np.zeros(0, dtype=float)
+pressed_dirs            = np.zeros(0, dtype=float)
+angular_velocity_cmd    = np.zeros(3, dtype=float)
+angular_speed           = math.radians(10.0)
+
 flags = {'clear': False, 'reset': False, 'quit': False}
 
 
-def setup(model, fraction=0.5):
-    global nu, ctrl_speed_per_sec, pressed_dirs
+def setup(model, fraction=0.5, angular_deg_per_sec=60.0):
+    global nu, ctrl_speed_per_sec, pressed_dirs, angular_speed
 
     nu = model.nu
     ctrl_speed_per_sec = np.zeros(nu, dtype=float)
     pressed_dirs = np.zeros(nu, dtype=float)
+    angular_speed = math.radians(float(angular_deg_per_sec))
 
     for i in range(nu):
         lo, hi = model.actuator_ctrlrange[i]
@@ -50,10 +65,13 @@ def setup(model, fraction=0.5):
     with ctrl_lock:
         for name in flags:
             flags[name] = False
+        angular_velocity_cmd[:] = 0.0
 
 
 def start_listener(suppress=True):
     global listener
+    if listener is not None:
+        return
     listener = keyboard.Listener(on_press=_on_press, on_release=_on_release, suppress=suppress)
     listener.daemon = True
     listener.start()
@@ -61,13 +79,17 @@ def start_listener(suppress=True):
 
 def stop_listener():
     global listener
+    if listener is None:
+        return
     listener.stop()
     listener = None
 
 
 def control_update(dt):
     with ctrl_lock:
-        return pressed_dirs * ctrl_speed_per_sec * dt
+        ctrl_delta = pressed_dirs * ctrl_speed_per_sec * dt
+        angular_cmd = angular_velocity_cmd.copy()
+    return ctrl_delta, angular_cmd
 
 
 def check_flag(name):
@@ -96,6 +118,10 @@ def _on_press(key):
         if idx < nu:
             with ctrl_lock:
                 pressed_dirs[idx] = direction
+    if key in ANGULAR_KEYS:
+        axis, direction = ANGULAR_KEYS[key]
+        with ctrl_lock:
+            angular_velocity_cmd[axis] = direction * angular_speed
 
 
 def _on_release(key):
@@ -104,3 +130,7 @@ def _on_release(key):
         if idx < nu:
             with ctrl_lock:
                 pressed_dirs[idx] = 0.0
+    if key in ANGULAR_KEYS:
+        axis, _ = ANGULAR_KEYS[key]
+        with ctrl_lock:
+            angular_velocity_cmd[axis] = 0.0

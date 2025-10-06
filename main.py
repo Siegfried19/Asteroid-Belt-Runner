@@ -48,8 +48,13 @@ def main():
                     break
 
                 dt = float(model.opt.timestep)
-                delta = manual_controller.control_update(dt)
-                _apply_control(model, data, nu, delta)
+                update = manual_controller.control_update(dt)
+                if isinstance(update, tuple):
+                    ctrl_delta, ang_vel_cmd = update
+                else:
+                    ctrl_delta, ang_vel_cmd = update, None
+                _apply_control(model, data, nu, ctrl_delta)
+                _apply_angular_velocity(data, joint_adr, ang_vel_cmd)
 
             mujoco.mj_step(model, data)
             viewer.sync()
@@ -61,8 +66,9 @@ def main():
             time_until_next_step = model.opt.timestep - (time.time() - step_start)
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
-    
-    manual_controller.stop_listener()
+
+    if USE_MANUAL_CONTROL:
+        manual_controller.stop_listener()
     print("viewer closed.")
 
 
@@ -78,6 +84,18 @@ def _apply_control(model, data, nu, delta):
         return
     data.ctrl[:nu] += delta
     _clamp_ctrl(model, data, nu)
+
+
+def _apply_angular_velocity(data, joint_adr, ang_vel_cmd):
+    if ang_vel_cmd is None:
+        return
+    if ang_vel_cmd.size != 3:
+        return
+    start = joint_adr + 3
+    end = start + 3
+    if end > data.qvel.size:
+        return
+    data.qvel[start:end] = ang_vel_cmd
 
 
 def _clamp_ctrl(model, data, nu):
