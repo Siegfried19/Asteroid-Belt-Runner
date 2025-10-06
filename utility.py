@@ -10,7 +10,7 @@ def format_sim_time(t):
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
-def report_motion_status(model, data, joint_adr, nu, control = True):
+def report_motion_status(model, data, joint_adr, nu, control = False):
     lin_vel = data.qvel[joint_adr: joint_adr + 3].copy()
     lin_acc = data.qacc[joint_adr: joint_adr + 3].copy()
     ang_vel = data.qvel[joint_adr + 3: joint_adr + 6].copy()
@@ -22,7 +22,7 @@ def report_motion_status(model, data, joint_adr, nu, control = True):
     ang_acc_mag = float(np.linalg.norm(ang_acc))
 
     print(
-        f"[t={format_sim_time(data.time)}] | |v| = {lin_speed:.3f} m/s | "
+        f"[t={format_sim_time(data.time)}] |v| = {lin_speed:.3f} m/s | "
         f"|a| = {lin_acc_mag:.3f} m/s^2 | |ω| = {ang_speed:.3f} rad/s | "
         f"|θ| = {ang_acc_mag:.3f} rad/s^2"
     )

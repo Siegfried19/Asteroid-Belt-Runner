@@ -54,33 +54,23 @@ def setup(model, fraction=0.5):
 
 def start_listener(suppress=True):
     global listener
-    if listener is not None:
-        return
-    listener = keyboard.Listener(
-        on_press=_on_press,
-        on_release=_on_release,
-        suppress=suppress,
-    )
+    listener = keyboard.Listener(on_press=_on_press, on_release=_on_release, suppress=suppress)
     listener.daemon = True
     listener.start()
 
 
 def stop_listener():
     global listener
-    if listener is None:
-        return
     listener.stop()
     listener = None
 
 
-def ctrl_delta(dt):
-    if nu == 0:
-        return np.zeros(0, dtype=float)
+def control_update(dt):
     with ctrl_lock:
         return pressed_dirs * ctrl_speed_per_sec * dt
 
 
-def consume_flag(name):
+def check_flag(name):
     with ctrl_lock:
         if not flags.get(name):
             return False
