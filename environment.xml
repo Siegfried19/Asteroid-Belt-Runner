@@ -1,0 +1,44 @@
+<mujoco model="environment">
+  <compiler meshdir="." angle="radian" coordinate="local"/>
+  <option gravity="0 0 0" timestep="0.004"/>
+
+  <asset>
+    <mesh name="spacecraft_mesh" file="F8_lightning.stl" scale="1 1 1"/>
+    <material name="ship_mat" rgba="0.9 0.9 0.95 1"/>
+  </asset>
+
+  <worldbody>
+    <body name="world_axes" pos="0 0 0">
+      <geom name="axis_x" type="capsule" fromto="0 0 0  500 0 0" size="0.5" rgba="1 0.2 0.2 1"/>
+      <geom name="axis_y" type="capsule" fromto="0 0 0  0 500 0" size="0.5" rgba="0.2 1 0.2 1"/>
+      <geom name="axis_z" type="capsule" fromto="0 0 0  0 0 500" size="0.5" rgba="0.2 0.2 1 1"/>
+    </body>
+
+    <body name="spacecraft" pos="0 0 0" euler="0 0 0">
+      <inertial 
+        pos="0 0 0" 
+        mass="153775" 
+        fullinertia="2.36938373e+06 1.52043941e+06 3.70858993e+06 -3.68491638e+03 2.79684673e+02 9.80345726e+04"/>
+      <joint 
+        name="spacecraft_joint" 
+        type="free"/>
+      <geom 
+        type="mesh" 
+        mesh="spacecraft_mesh" 
+        material="ship_mat" 
+        pos="-0.01318 -1.64993 -0.06021" 
+        contype="0" 
+        conaffinity="0"/>
+       <site name="virtual_thruster" pos="0 0 0" euler="0 0 0" size="0.02" rgba="0 1 0 1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <general name="Fx" biastype="none" site="virtual_thruster" gear="1 0 0 0 0 0" ctrlrange="-9.805e+06 9.805e+06"/>
+    <general name="Fy" biastype="none" site="virtual_thruster" gear="0 1 0 0 0 0" ctrlrange="-9.805e+06 9.805e+06"/>
+    <general name="Fz" biastype="none" site="virtual_thruster" gear="0 0 1 0 0 0" ctrlrange="-5.280e+06 8.900e+06"/>
+    <general name="Mx" biastype="none" site="virtual_thruster" gear="0 0 0 1 0 0" ctrlrange="-7.900e+07 7.900e+07"/>
+    <general name="My" biastype="none" site="virtual_thruster" gear="0 0 0 0 1 0" ctrlrange="-6.900e+07 6.900e+07"/>
+    <general name="Mz" biastype="none" site="virtual_thruster" gear="0 0 0 0 0 1" ctrlrange="-8.600e+07 8.600e+07"/>
+  </actuator>
+</mujoco>
