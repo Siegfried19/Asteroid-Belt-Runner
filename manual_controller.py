@@ -24,17 +24,17 @@ SPECIAL_KEYS = {
     'quit': keyboard.Key.esc,
 }
 
-ctrl_lock   = threading.Lock()
-listener    = None
-nu          = None
-ctrl_speed_per_sec  = None
-pressed_dirs        = None
+ctrl_lock = threading.Lock()
+listener = None
+nu = 0
+ctrl_speed_per_sec = np.zeros(0, dtype=float)
+pressed_dirs = np.zeros(0, dtype=float)
 flags = {'clear': False, 'reset': False, 'quit': False}
 
 
 def setup(model, fraction=0.5):
     global nu, ctrl_speed_per_sec, pressed_dirs
-    
+
     nu = model.nu
     ctrl_speed_per_sec = np.zeros(nu, dtype=float)
     pressed_dirs = np.zeros(nu, dtype=float)
@@ -54,23 +54,36 @@ def setup(model, fraction=0.5):
 
 def start_listener(suppress=True):
     global listener
-    listener = keyboard.Listener(on_press=_on_press, on_release=_on_release, suppress=suppress)
+    if listener is not None:
+        return
+    listener = keyboard.Listener(
+        on_press=_on_press,
+        on_release=_on_release,
+        suppress=suppress,
+    )
     listener.daemon = True
     listener.start()
 
 
 def stop_listener():
+    global listener
+    if listener is None:
+        return
     listener.stop()
     listener = None
 
 
-def output_update(dt):
+def ctrl_delta(dt):
+    if nu == 0:
+        return np.zeros(0, dtype=float)
     with ctrl_lock:
         return pressed_dirs * ctrl_speed_per_sec * dt
 
 
-def reset_flag(name):
+def consume_flag(name):
     with ctrl_lock:
+        if not flags.get(name):
+            return False
         flags[name] = False
         return True
 
@@ -98,5 +111,6 @@ def _on_press(key):
 def _on_release(key):
     if key in KEY_TO_CTRL_INDEX:
         idx, _ = KEY_TO_CTRL_INDEX[key]
-        with ctrl_lock:
-            pressed_dirs[idx] = 0.0
+        if idx < nu:
+            with ctrl_lock:
+                pressed_dirs[idx] = 0.0
