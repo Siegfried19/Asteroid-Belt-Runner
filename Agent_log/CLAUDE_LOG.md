@@ -105,6 +105,18 @@
 - **主力模型**:`logs/ppo_rebuild_v15/best/best_model.zip`(=1.5M checkpoint,41%)。改进方向:早停/降LR 治后段
   发散、proximity reward 降碰撞率。看回放:`Agent_tool/watch.sh logs/ppo_rebuild_v15/best/best_model.zip 30 40`。
 
+## 2026-06-08 — 保存收尾 / 跨机器提交（用户将换机器）
+
+- 用户满意现状(看了回放,41% 穿越),要求保存一切以便换机器。
+- **提交**(分支 `rebuild/asteroid-belt-rl`)：`10ef9be` 大带重设计+41%+forkserver 崩溃根治；
+  `59baeec` 跟踪 v15 best 模型快照。
+- **主力模型入 git**：拷到 `models/ppo_v15_best_41pct.zip`(=v15 1.5M checkpoint)。踩坑:`.gitignore`
+  的 `*.zip` 把它也忽略了,加例外 `!models/*.zip`——但**`.gitignore 不支持行内注释**(我把注释写行内
+  导致 pattern 失效),注释挪到单独一行才生效。+ `models/README.md` 说明模型/用法/改进方向。
+- **接续文档**：更新 `REBUILD_TODO.md` 断点段(现状=41%模型、带定型参数、forkserver 警告、下一步)。
+- **推送**：本环境无 git 凭据/gh,我推不了;用户自行 `git push -u origin rebuild/asteroid-belt-rl` 完成。
+- 换机器接续:clone → checkout 该分支 → 照 CLAUDE.md 建 `asteroid-belt-runner` env → check_env → 读 REBUILD_TODO。
+
 ## 2026-06-08 — ⚠️ 崩溃真凶 = torch dynamo 正则 bug（不是内存/陨石/envs）
 
 - **重大纠错**:之前 v5–v10 把频繁崩溃归因为"陨石多/envs多/reset重采样的内存损坏"——**全错**。
