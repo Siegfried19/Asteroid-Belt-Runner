@@ -57,10 +57,16 @@ class AsteroidBeltEnv(gym.Env):
         yaw_rate: float = 35.0,
         rot_reach_time: float = 2.0,  # seconds to reach max rate -> sets angular accel
         goal_clearance: float = 40.0,
+        # random exit: each episode the goal is a point (goal_x, gy, gz) at a random off-axis
+        # spot, so the ship must weave to a specific exit instead of flying straight down +X.
+        exit_r_min: float = 40.0,   # exit is sampled this far .. exit_r_max off the X axis (m)
+        exit_r_max: float = 90.0,
+        goal_radius: float = 25.0,  # success = reaching within this sphere of the goal point
         randomize_belt: bool = True,
         render_mode: str = None,
         # reward weights
         w_dist: float = 2.0,        # potential-based: reward for shrinking distance to goal point
+        w_speed: float = 0.02,      # reward velocity TOWARD the goal (fly fast, the right way)
         w_heading: float = 0.05,    # small bonus for pointing the nose toward the goal
         w_proximity: float = 0.05,  # SOFT hint to give asteroids room (collision is the hard stop);
         d_safe: float = 10.0,       #   kept small so it never dominates forward progress
@@ -68,7 +74,7 @@ class AsteroidBeltEnv(gym.Env):
         w_gload: float = 0.15,      # penalty on linear G-load above g_safe (keep the pilot alive)
         g_safe: float = 8.0,        # comfortable sustained acceleration (G); excess is penalized
         ctrl_cost: float = 0.001,
-        time_cost: float = 0.02,
+        time_cost: float = 0.03,    # per-step cost -> rewards finishing fast
         collision_penalty: float = 300.0,
         success_bonus: float = 200.0,
         oob_penalty: float = 100.0,
@@ -91,10 +97,14 @@ class AsteroidBeltEnv(gym.Env):
         self.yaw_rate = yaw_rate
         self.rot_reach_time = rot_reach_time
         self.goal_clearance = goal_clearance
+        self.exit_r_min = exit_r_min
+        self.exit_r_max = exit_r_max
+        self.goal_radius = goal_radius
         self.randomize_belt = randomize_belt
         self.render_mode = render_mode
 
         self.w_dist = w_dist
+        self.w_speed = w_speed
         self.w_heading = w_heading
         self.w_proximity = w_proximity
         self.d_safe = d_safe
@@ -108,6 +118,7 @@ class AsteroidBeltEnv(gym.Env):
         self.oob_penalty = oob_penalty
 
         self.goal_x = self.base_cfg.belt_x_range[1] + goal_clearance
+        self.goal = np.array([self.goal_x, 0.0, 0.0])   # (re)sampled each reset
 
         self._build(self.base_cfg)
         self.n_active = self.n_total   # curriculum hook (set_n_asteroids); all active by default
@@ -279,7 +290,7 @@ class AsteroidBeltEnv(gym.Env):
         up = R[:, 2]
 
         pos = self.ship_pos
-        goal_vec = np.array([self.goal_x, 0.0, 0.0]) - pos
+        goal_vec = self.goal - pos
         goal_dist = np.linalg.norm(goal_vec)
         goal_dir = goal_vec / (goal_dist + 1e-9)
 
@@ -326,6 +337,10 @@ class AsteroidBeltEnv(gym.Env):
         # ship starts at origin, identity orientation, at rest
         self.data.qpos[self.qpos_adr:self.qpos_adr + 7] = [0, 0, 0, 1, 0, 0, 0]
         self.data.qvel[self.qvel_adr:self.qvel_adr + 6] = 0.0
+        # random exit point: off-axis (gy, gz) so the ship must weave to it, not fly straight
+        th = self.np_random.uniform(0.0, 2.0 * np.pi)
+        rho = self.np_random.uniform(self.exit_r_min, self.exit_r_max)
+        self.goal = np.array([self.goal_x, rho * np.cos(th), rho * np.sin(th)])
         # scatter the asteroids for this episode
         self._place_asteroids(self.np_random)
         mujoco.mj_forward(self.model, self.data)
@@ -334,7 +349,7 @@ class AsteroidBeltEnv(gym.Env):
         return self._obs(), {}
 
     def _goal_dist(self):
-        return float(np.linalg.norm(np.array([self.goal_x, 0.0, 0.0]) - self.ship_pos))
+        return float(np.linalg.norm(self.goal - self.ship_pos))
 
     def set_n_asteroids(self, n):
         """Curriculum hook: change active belt density; takes effect on the next reset()."""
@@ -372,10 +387,13 @@ class AsteroidBeltEnv(gym.Env):
         goal_dist = self._goal_dist()
         reward = self.w_dist * (self._prev_goal_dist - goal_dist)
         self._prev_goal_dist = goal_dist
+        goal_dir = (self.goal - pos)
+        goal_dir = goal_dir / (np.linalg.norm(goal_dir) + 1e-9)
+        # speed reward: velocity component toward the goal (fly fast, in the right direction)
+        v_world = self.data.qvel[self.qvel_adr:self.qvel_adr + 3]
+        reward += self.w_speed * float(np.dot(v_world, goal_dir))
         # small heading bonus: nose (body +X) pointing toward the goal
         fwd = self._rot()[:, 0]
-        goal_dir = (np.array([self.goal_x, 0.0, 0.0]) - pos)
-        goal_dir = goal_dir / (np.linalg.norm(goal_dir) + 1e-9)
         reward += self.w_heading * float(np.dot(fwd, goal_dir))
         # proximity penalty: discourage hugging asteroid surfaces (learn to give them room)
         nearest_surf = self._nearest_surface_dist()
@@ -408,7 +426,8 @@ class AsteroidBeltEnv(gym.Env):
             reward -= self.collision_penalty
             terminated = True
             info["outcome"] = "collision"
-        elif x >= self.goal_x:
+        elif np.linalg.norm(pos - self.goal) < self.goal_radius:
+            # reached the (random, off-axis) exit point -- not just any spot on the goal plane
             reward += self.success_bonus
             terminated = True
             info["outcome"] = "success"

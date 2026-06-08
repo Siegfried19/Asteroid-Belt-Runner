@@ -8,12 +8,20 @@ A MuJoCo simulation of the F8C Lightning spacecraft (from Star Citizen) flying t
 
 ## Setup & Run
 
-Everything (RL + manual play) uses a single **`asteroid-belt-runner`** conda env (Python 3.10:
-MuJoCo 3.3.7, Gymnasium 0.29.1, Stable-Baselines3 2.3.0, PyTorch 2.2.1+cu121, pynput, **numpy
-1.26 / <2** — the RL stack requires it; `main.py` manual play runs fine under it too). Note the
-README's quick-start (`conda create ... python=3.11` + `requirements.txt`, numpy 2.x) is the
-**stale** older recipe and would collide with this env's name — don't follow it; build the env
-per the RL deps above. Run everything **from the repo root**:
+Everything (RL + manual play) uses a single **`asteroid-belt-runner`** conda env (Python 3.11:
+MuJoCo 3.3.7, Gymnasium 0.29.1, Stable-Baselines3 2.3.0, PyTorch 2.2.1+cu121, pynput, imageio,
+**numpy 1.26 / <2** — the RL stack requires it; `main.py` manual play runs fine under it too).
+The README quick-start's `requirements.txt` (numpy 2.x) is the **stale** older recipe — don't
+follow it; build the env per the RL deps above.
+
+> **Crash note (important):** this conda's torch 2.2.1 intermittently **segfaults while importing
+> `torch._dynamo`** (a C-level flake; in 3.10 it surfaced as an `sre_compile` ValueError instead).
+> It only bites at import. The fix is **NOT** a Python version (3.11 still flakes) — it's in
+> `train/train_ppo.py`: SubprocVecEnv `start_method="forkserver"` + torch/SB3 imports moved into
+> `main()` + `_warm_import` retry, with `Agent_tool/train_resilient.sh` auto-resuming the rare
+> startup flake. **Do not switch to spawn (constant crashes) or fork (CUDA deadlock).**
+
+Run everything **from the repo root**:
 
 ```bash
 conda run -n asteroid-belt-runner python main.py                 # manual-play viewer (for fun)

@@ -105,6 +105,19 @@
 - **主力模型**:`logs/ppo_rebuild_v15/best/best_model.zip`(=1.5M checkpoint,41%)。改进方向:早停/降LR 治后段
   发散、proximity reward 降碰撞率。看回放:`Agent_tool/watch.sh logs/ppo_rebuild_v15/best/best_model.zip 30 40`。
 
+## 2026-06-08 — 任务改造(随机出口+求快) + Python 3.11 根治尝试(失败,保留 forkserver)
+
+- **任务改造**(用户要加难度)：①**随机偏轴出口**——每回合目标改为点 `(goal_x, gy, gz)`,gy/gz 偏轴
+  40–90m 随机;势能/obs/heading 全改指向这个 3D 出口;成功=进出口点 `goal_radius=25m` 球(不再"飞过平面就赢",
+  逼飞船绕到指定出口、不能直冲)。②**求快**——加 `w_speed=0.02 ×(速度·目标方向)` 奖励 + time_cost 0.02→0.03。
+  check_env 双模式过,出口随机生效。
+- **Python 3.11 根治尝试 → 失败**:建 abr311(3.11+同栈)测 `import torch._dynamo`,第一次 0/20(运气),
+  改名为 asteroid-belt-runner 后 4/20——**3.11 没修好**,而且 3.11 里它直接 **段错误(core dumped)**,
+  说明根因是 **torch 2.2.1 的 `_dynamo` 导入在 C 层偶发段错误**(3.10 的 sre_compile ValueError 只是同一崩溃
+  的 Python 层表象),**与 Python 版本无关**。根治只能换 torch(2.3+,有 numpy/sb3 兼容风险)。
+- **决定**:env 切到 3.11(和 3.10 等价、略快,旧 3.10 已删,check_env 过)+ 补 imageio;**forkserver 仍是真正
+  的崩溃解法**(已写进 CLAUDE.md 警告)。是否赌 torch 2.3 待用户定。
+
 ## 2026-06-08 — 保存收尾 / 跨机器提交（用户将换机器）
 
 - 用户满意现状(看了回放,41% 穿越),要求保存一切以便换机器。
