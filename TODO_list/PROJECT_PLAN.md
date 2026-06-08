@@ -9,7 +9,7 @@
 不参与 RL（RL 用力/力矩或推力作为动作）。
 
 ## 技术栈（已确认可用，无需安装）
-- conda env: **`space-robotics-project`**（Python 3.10）
+- conda env: **`asteroid-belt-runner`**（Python 3.10）
 - MuJoCo 3.3.7 · Gymnasium 0.29.1 · Stable-Baselines3 2.3.0 (PPO) · PyTorch 2.2.1+cu121 · NumPy 1.26
 - 注意：本 env 的 numpy 是 1.26（SB3/gym 要求 <2），与根目录 `requirements.txt` 里写的 2.3.3 不一致；
   RL 代码以本 env 为准，`main.py` 试玩在两者下都能跑。
@@ -46,11 +46,12 @@
   - reset：randomize_belt 时换 seed 重建带
 - [x] `Agent_tool/check_env.py`：env_checker 通过 + 20 集随机动作 rollout（结果合理：无意外成功）
 
-### Phase 3 — 训练简化控制器（Roadmap #2 续）🚧 进行中
+### Phase 3 — 训练简化控制器（Roadmap #2 续）✅ 达成（地基重建后）
 - [x] `train/train_ppo.py`：SB3 PPO + SubprocVecEnv + checkpoint/best + tensorboard
 - [x] `Agent_tool/rollout_viewer.py`：加载 checkpoint 在 viewer 里回放策略
 - [x] 冒烟训练跑通（~5000 fps，PPO 更新正常，模型保存）
-- [ ] **跑一次正式训练**（如 1M~3M 步），确认 reward 上升、学到避障/穿越 ← 下一步
+- [x] **正式训练达成**：地基重建后 `ppo_rebuild_v4` 课程 PPO 在满 60 密度带 **SUCCESS 100% / 0 碰撞**
+      （mean_return 544±25；详见 `TODO_list/REBUILD_TODO.md` R8 与 `Agent_log/CLAUDE_LOG.md`）。
 
 ### Phase 4 — 真实动力学（Roadmap #3）✅ 建模完成
 - [x] `envs/thruster_layout.py`：17 推进器（2 主 +X / 3 反向 −X / 12 RCS），每个 = site + site-actuator
@@ -79,13 +80,13 @@
 ## 训练 / 评估命令速查
 ```bash
 # 训练（简化）
-conda run -n space-robotics-project python train/train_ppo.py --timesteps 2000000 --run-name ppo_simplified_v2
+conda run -n asteroid-belt-runner python train/train_ppo.py --timesteps 2000000 --run-name ppo_simplified_v2
 # 训练（真实 17 推进器）
-conda run -n space-robotics-project python train/train_ppo.py --dynamics realistic --timesteps 3000000 --run-name ppo_realistic_v1
+conda run -n asteroid-belt-runner python train/train_ppo.py --dynamics realistic --timesteps 3000000 --run-name ppo_realistic_v1
 # 评估成功率
-conda run -n space-robotics-project python Agent_tool/eval_policy.py --model logs/<run>/best/best_model.zip --episodes 100
+conda run -n asteroid-belt-runner python Agent_tool/eval_policy.py --model logs/<run>/best/best_model.zip --episodes 100
 # 回放（需显示器）
-conda run -n space-robotics-project python Agent_tool/rollout_viewer.py --model logs/<run>/best/best_model.zip
+conda run -n asteroid-belt-runner python Agent_tool/rollout_viewer.py --model logs/<run>/best/best_model.zip
 ```
 
 ---

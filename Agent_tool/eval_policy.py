@@ -1,7 +1,7 @@
 """Evaluate a trained policy headlessly: success rate + outcome breakdown.
 
 Run from repo root:
-    conda run -n space-robotics-project python Agent_tool/eval_policy.py \
+    conda run -n asteroid-belt-runner python Agent_tool/eval_policy.py \
         --model logs/ppo_simplified_v1/best/best_model.zip --episodes 100
 """
 import argparse

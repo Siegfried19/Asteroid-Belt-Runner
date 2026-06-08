@@ -8,17 +8,19 @@ A MuJoCo simulation of the F8C Lightning spacecraft (from Star Citizen) flying t
 
 ## Setup & Run
 
-RL work uses the existing **`space-robotics-project`** conda env (Python 3.10: MuJoCo 3.3.7,
-Gymnasium 0.29.1, Stable-Baselines3 2.3.0, PyTorch 2.2.1+cu121, pynput). The `requirements.txt`
-/ README `asteroid-belt-runner` env is the older manual-play setup (numpy 2.x); the RL stack
-needs numpy <2, so prefer `space-robotics-project`. Run everything **from the repo root**:
+Everything (RL + manual play) uses a single **`asteroid-belt-runner`** conda env (Python 3.10:
+MuJoCo 3.3.7, Gymnasium 0.29.1, Stable-Baselines3 2.3.0, PyTorch 2.2.1+cu121, pynput, **numpy
+1.26 / <2** — the RL stack requires it; `main.py` manual play runs fine under it too). Note the
+README's quick-start (`conda create ... python=3.11` + `requirements.txt`, numpy 2.x) is the
+**stale** older recipe and would collide with this env's name — don't follow it; build the env
+per the RL deps above. Run everything **from the repo root**:
 
 ```bash
-conda run -n space-robotics-project python main.py                 # manual-play viewer (for fun)
-conda run -n space-robotics-project python Agent_tool/check_env.py # env sanity check (headless)
-conda run -n space-robotics-project python train/train_ppo.py --timesteps 1_000_000
-conda run -n space-robotics-project python Agent_tool/preview_belt.py --n 80   # needs a display
-conda run -n space-robotics-project python Agent_tool/rollout_viewer.py --model logs/<run>/best/best_model.zip
+conda run -n asteroid-belt-runner python main.py                 # manual-play viewer (for fun)
+conda run -n asteroid-belt-runner python Agent_tool/check_env.py # env sanity check (headless)
+conda run -n asteroid-belt-runner python train/train_ppo.py --timesteps 1_000_000
+conda run -n asteroid-belt-runner python Agent_tool/preview_belt.py --n 80   # needs a display
+conda run -n asteroid-belt-runner python Agent_tool/rollout_viewer.py --model logs/<run>/best/best_model.zip
 tensorboard --logdir logs/
 ```
 
@@ -61,19 +63,28 @@ Because the live path sets `qvel` directly, the six XML actuators are not curren
 
 ### RL stack (added 2026-06-08)
 
+- **`envs/asteroid_mesh.py`** — procedurally builds the irregular "potato" asteroid mesh library
+  (`assets/asteroids/asteroid_*.obj`): icosphere + random Gaussian bumps/craters, pure NumPy. Run
+  once to (re)build. MuJoCo collides on the **convex hull** of the mesh (craters filled, bumps kept).
 - **`envs/belt_generator.py`** — builds the scene at runtime via `mujoco.MjSpec`: loads
   `environment.xml`, attaches an invisible capsule **collision proxy** to the ship (the STL geom
-  stays visual-only), and scatters `BeltConfig.n_asteroids` sphere asteroids in an X-axis slab.
-  Collision masks make asteroids collide only with the ship (`SHIP_*`/`AST_*` contype/conaffinity),
-  not each other or the axis markers. `dynamic=True` gives drifting free-joint asteroids.
+  stays visual-only), and scatters `BeltConfig.n_asteroids` **free-joint potato-mesh** asteroids in
+  an X-axis slab — each a random library mesh with a unique per-axis `scale` (power-law size x aspect)
+  and random orientation, min-separation so they don't overlap. Collision masks make asteroids collide
+  only with the ship (`SHIP_*`/`AST_*`), not each other or the axis markers. Returns `list[Asteroid]`
+  (body/geom/joint names + `r_eff`, a **conservative enclosing-sphere radius**). The scene is compiled
+  **once**; the env re-places rocks per episode rather than recompiling.
 - **`envs/asteroid_belt_env.py`** — `AsteroidBeltEnv(gym.Env)`. Action = normalized 6-vector mapped
-  to the 6 actuator ctrlranges (this is the **simplified dynamics**, distinct from `main.py`'s
-  kinematic play mode). Obs = body-frame vel/ang-vel + fwd/up axes + goal dir/dist + K-nearest
-  asteroids. Reward rewards +X progress, penalizes control/time/collision/OOB, bonuses success.
-  `randomize_belt=True` rebuilds the MjModel each `reset()` — note the stored MjSpec is `self.mj_spec`
-  (NOT `self.spec`, which Gymnasium reserves for `EnvSpec`).
+  to **F8C-calibrated** force/torque (sign-asymmetric main/retro thrust + RCS torques; see
+  [[f8c-performance-specs]]), distinct from `main.py`'s kinematic play mode; realistic mode -> 17
+  thrusters. Obs (160) = body-frame vel/ang-vel + fwd/up + goal dir/dist (16) **plus a body-frame
+  full-sphere radar** (2 channels x n_az x n_el: proximity + closing velocity, no occlusion, nearest
+  rock per bin). Reward = goal-potential + heading + proximity + spin + **G-load** (penalize >g_safe
+  to keep the pilot alive) + ctrl/time, success/collision/OOB terminals. `reset()` re-scatters rocks
+  via qpos/qvel (build-once); curriculum density via `n_active` (extra rocks parked far out of bounds).
+  The stored MjSpec is `self.mj_spec` (NOT `self.spec`, which Gymnasium reserves for `EnvSpec`).
 - **`train/train_ppo.py`** — SB3 PPO over `SubprocVecEnv`, checkpoints/best-model/tensorboard to `logs/`.
-- Realistic 17-thruster dynamics (Roadmap #3) is not built yet — see `TODO_list/PROJECT_PLAN.md`.
+- **`envs/thruster_layout.py`** — the 17 realistic thrusters (Roadmap #3), built; training on them is R10.
 
 ### Conventions
 

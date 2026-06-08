@@ -35,12 +35,17 @@
     </body>
   </worldbody>
 
+  <!-- Six "virtual" force/torque actuators (simplified dynamics). The ctrlranges below
+       are a generous *non-clamping envelope*; the real, F8C-calibrated force/torque
+       limits are defined in AsteroidBeltEnv (asymmetric main/retro thrust, RCS torques)
+       and applied within these bounds. Manual play (main.py) writes qvel directly and
+       does not use these. -->
   <actuator>
-    <general name="Fx" biastype="none" site="virtual_thruster" gear="1 0 0 0 0 0" ctrlrange="-9.805e+06 9.805e+06"/>
-    <general name="Fy" biastype="none" site="virtual_thruster" gear="0 1 0 0 0 0" ctrlrange="-9.805e+06 9.805e+06"/>
-    <general name="Fz" biastype="none" site="virtual_thruster" gear="0 0 1 0 0 0" ctrlrange="-5.280e+06 8.900e+06"/>
-    <general name="Mx" biastype="none" site="virtual_thruster" gear="0 0 0 1 0 0" ctrlrange="-7.900e+07 7.900e+07"/>
-    <general name="My" biastype="none" site="virtual_thruster" gear="0 0 0 0 1 0" ctrlrange="-6.900e+07 6.900e+07"/>
-    <general name="Mz" biastype="none" site="virtual_thruster" gear="0 0 0 0 0 1" ctrlrange="-8.600e+07 8.600e+07"/>
+    <general name="Fx" biastype="none" site="virtual_thruster" gear="1 0 0 0 0 0" ctrlrange="-2.0e+07 2.0e+07"/>
+    <general name="Fy" biastype="none" site="virtual_thruster" gear="0 1 0 0 0 0" ctrlrange="-2.0e+07 2.0e+07"/>
+    <general name="Fz" biastype="none" site="virtual_thruster" gear="0 0 1 0 0 0" ctrlrange="-2.0e+07 2.0e+07"/>
+    <general name="Mx" biastype="none" site="virtual_thruster" gear="0 0 0 1 0 0" ctrlrange="-5.0e+06 5.0e+06"/>
+    <general name="My" biastype="none" site="virtual_thruster" gear="0 0 0 0 1 0" ctrlrange="-5.0e+06 5.0e+06"/>
+    <general name="Mz" biastype="none" site="virtual_thruster" gear="0 0 0 0 0 1" ctrlrange="-5.0e+06 5.0e+06"/>
   </actuator>
 </mujoco>

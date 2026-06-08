@@ -5,17 +5,21 @@ Simplified dynamics = the single 6-DOF virtual thruster from `environment.xml`
 goal is to traverse the belt along +X without colliding.
 
   observation : ship body-frame linear/angular velocity, orientation (fwd & up
-                axes in world), goal direction + distance, and the K nearest
-                asteroids (body-frame relative position, radius, surface distance).
-  action      : Box(-1, 1, (6,)) -> linearly mapped to each actuator's ctrlrange.
-  reward      : progress toward the goal plane, minus control & time cost,
-                large bonus on success, large penalty on collision.
+                axes in world), goal direction + distance (16), plus a body-frame
+                full-sphere radar: per direction bin, proximity (1/(1+surf)) and
+                radial closing velocity of the nearest asteroid (2 x n_az x n_el).
+  action      : Box(-1, 1, (6,)) -> F8C-calibrated force/torque (asymmetric main/
+                retro thrust + RCS torques); realistic mode -> 17 thrusters.
+  reward      : progress toward the goal plane, minus proximity / spin / G-load /
+                control / time cost, large bonus on success, large penalty on collision.
   episode end : collision / reached goal / out of bounds (terminated),
                 or step budget exhausted (truncated).
 
-The belt is regenerated with a fresh seed each reset when `randomize_belt=True`,
-which rebuilds the MjModel — fine for headless training; the rollout viewer
-re-acquires the model after reset.
+Scene model (post-rebuild, 2026-06-08): the belt is **compiled once** with
+`n_asteroids` free-joint potato-mesh rocks. `reset()` re-places the rocks by writing
+qpos (position + orientation) and qvel (slow drift + spin) directly — no recompile.
+Curriculum density is handled by activating only `n_active` rocks and parking the
+rest far beyond the bounds (so the model stays fixed-size while density varies).
 """
 
 import gymnasium as gym
@@ -23,7 +27,10 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
-from envs.belt_generator import BeltConfig, build_scene, SHIP_BODY
+from envs.belt_generator import BeltConfig, build_scene, sample_belt, _rand_quat, SHIP_BODY
+
+# Parking spot for inactive (curriculum) asteroids: far past the goal, out of play.
+_PARK_X = 5000.0
 
 
 class AsteroidBeltEnv(gym.Env):
@@ -33,19 +40,31 @@ class AsteroidBeltEnv(gym.Env):
         self,
         cfg: BeltConfig = None,
         dynamics: str = "simplified",
-        k_nearest: int = 8,
+        k_nearest: int = 8,         # deprecated (KNN obs replaced by radar); kept for compat
+        n_az: int = 12,             # radar azimuth bins (around body-X)
+        n_el: int = 6,              # radar elevation bins
         max_steps: int = 1500,
         frame_skip: int = 5,
         force_scale: float = 1.0,
+        # F8C-calibrated simplified-dynamics limits (decoupled from the XML envelope):
+        fwd_accel: float = 103.5,   # main thrust +X (m/s^2, 10.55 G)
+        rev_accel: float = 36.3,    # retro/brake -X (m/s^2, 3.70 G) -- asymmetric
+        lat_accel: float = 40.0,    # lateral strafe Fy/Fz (m/s^2, no official figure)
+        roll_rate: float = 140.0,   # max body rates (deg/s) used to size RCS torques
+        pitch_rate: float = 38.0,
+        yaw_rate: float = 35.0,
+        rot_reach_time: float = 2.0,  # seconds to reach max rate -> sets angular accel
         goal_clearance: float = 40.0,
         randomize_belt: bool = True,
         render_mode: str = None,
         # reward weights
-        w_dist: float = 1.0,        # potential-based: reward for shrinking distance to goal point
+        w_dist: float = 2.0,        # potential-based: reward for shrinking distance to goal point
         w_heading: float = 0.05,    # small bonus for pointing the nose toward the goal
-        w_proximity: float = 0.4,   # penalty for hugging asteroid surfaces (teaches avoidance)
-        d_safe: float = 12.0,       # proximity penalty kicks in within this surface distance (m)
+        w_proximity: float = 0.05,  # SOFT hint to give asteroids room (collision is the hard stop);
+        d_safe: float = 10.0,       #   kept small so it never dominates forward progress
         w_spin: float = 0.01,       # penalty on |angular velocity| (keep attitude controllable)
+        w_gload: float = 0.15,      # penalty on linear G-load above g_safe (keep the pilot alive)
+        g_safe: float = 8.0,        # comfortable sustained acceleration (G); excess is penalized
         ctrl_cost: float = 0.001,
         time_cost: float = 0.02,
         collision_penalty: float = 300.0,
@@ -55,10 +74,19 @@ class AsteroidBeltEnv(gym.Env):
         super().__init__()
         self.base_cfg = cfg or BeltConfig()
         self.dynamics = dynamics
-        self.k = k_nearest
+        self.n_az = int(n_az)
+        self.n_el = int(n_el)
+        self.n_bins = self.n_az * self.n_el
         self.max_steps = max_steps
         self.frame_skip = frame_skip
         self.force_scale = force_scale
+        self.fwd_accel = fwd_accel
+        self.rev_accel = rev_accel
+        self.lat_accel = lat_accel
+        self.roll_rate = roll_rate
+        self.pitch_rate = pitch_rate
+        self.yaw_rate = yaw_rate
+        self.rot_reach_time = rot_reach_time
         self.goal_clearance = goal_clearance
         self.randomize_belt = randomize_belt
         self.render_mode = render_mode
@@ -68,6 +96,8 @@ class AsteroidBeltEnv(gym.Env):
         self.w_proximity = w_proximity
         self.d_safe = d_safe
         self.w_spin = w_spin
+        self.w_gload = w_gload
+        self.g_safe = g_safe
         self.ctrl_cost = ctrl_cost
         self.time_cost = time_cost
         self.collision_penalty = collision_penalty
@@ -75,13 +105,14 @@ class AsteroidBeltEnv(gym.Env):
         self.oob_penalty = oob_penalty
 
         self.goal_x = self.base_cfg.belt_x_range[1] + goal_clearance
-        self._reset_seed_counter = int(self.base_cfg.seed)
 
         self._build(self.base_cfg)
+        self.n_active = self.n_total   # curriculum hook (set_n_asteroids); all active by default
 
         # action: normalized vector -> the controlled actuators' ctrlrange
         self.action_space = spaces.Box(-1.0, 1.0, shape=(len(self.act_ids),), dtype=np.float32)
-        obs_dim = 3 + 3 + 3 + 3 + 4 + self.k * 5
+        # obs = ego(16) + radar(2 channels x n_bins): proximity + closing velocity
+        obs_dim = 3 + 3 + 3 + 3 + 4 + 2 * self.n_bins
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self._viewer = None
@@ -89,7 +120,8 @@ class AsteroidBeltEnv(gym.Env):
 
     # ------------------------------------------------------------------ build
     def _build(self, cfg: BeltConfig):
-        self.model, self.mj_spec, self.belt_info = build_scene(cfg, dynamics=self.dynamics)
+        # Compile once; reset() re-places asteroids via qpos/qvel (no recompile).
+        self.model, self.mj_spec, self.asteroids = build_scene(cfg, dynamics=self.dynamics)
         self.data = mujoco.MjData(self.model)
         self.body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, SHIP_BODY)
         jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f"{SHIP_BODY}_joint")
@@ -98,22 +130,54 @@ class AsteroidBeltEnv(gym.Env):
         self.ship_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "ship_collision"
         )
-        # asteroid geom ids + radii (in belt_info order)
+        # ship collision capsule (body-X axis) — collisions are detected geometrically
+        # against the asteroids' conservative enclosing spheres (r_eff), see _capsule_collision.
+        self.ship_cap_r = float(self.base_cfg.ship_collision_radius)
+        self.ship_cap_h = float(self.base_cfg.ship_collision_halflen)
+
+        # per-asteroid handles (build order), and free-joint qpos/dof addresses
+        self.n_total = len(self.asteroids)
         self.ast_geom_ids = np.array(
-            [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name) for name, _ in self.belt_info]
-        )
-        self.ast_radii = np.array([r for _, r in self.belt_info], dtype=float)
+            [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, a.geom) for a in self.asteroids],
+            dtype=int)
+        self.ast_r = np.array([a.r_eff for a in self.asteroids], dtype=float)
+        ast_jids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, a.joint)
+                    for a in self.asteroids]
+        self.ast_qpos_adr = np.array([self.model.jnt_qposadr[j] for j in ast_jids], dtype=int)
+        self.ast_dof_adr = np.array([self.model.jnt_dofadr[j] for j in ast_jids], dtype=int)
+
         # which actuators this env commands, and their ctrl ranges
         if self.dynamics == "realistic":
             from envs.thruster_layout import THRUSTER_NAMES
             self.act_ids = np.array(
                 [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in THRUSTER_NAMES]
             )
+            # realistic thrusters map action[-1,1] linearly onto their [0,max] ctrlrange
+            self.ctrl_lo = self.model.actuator_ctrlrange[self.act_ids, 0].copy()
+            self.ctrl_hi = self.model.actuator_ctrlrange[self.act_ids, 1].copy()
         else:
-            # the 6 virtual force/torque actuators (Fx Fy Fz Mx My Mz)
+            # the 6 virtual force/torque actuators (Fx Fy Fz Mx My Mz). Map action[-1,1]
+            # to F8C-calibrated force/torque via a per-axis, sign-asymmetric scale so that
+            # action=0 -> zero force (no forward bias despite asymmetric main/retro thrust).
             self.act_ids = np.arange(6)
-        self.ctrl_lo = self.model.actuator_ctrlrange[self.act_ids, 0].copy()
-        self.ctrl_hi = self.model.actuator_ctrlrange[self.act_ids, 1].copy()
+            mass = float(self.model.body_mass[self.body_id])
+            # inertia about the body axes: rotate the principal moments back into the
+            # body frame (model.body_inertia is in the principal frame given by body_iquat,
+            # which may permute axes) and read the diagonal.
+            Rq = np.zeros(9)
+            mujoco.mju_quat2Mat(Rq, self.model.body_iquat[self.body_id])
+            Rq = Rq.reshape(3, 3)
+            I_body = Rq @ np.diag(self.model.body_inertia[self.body_id]) @ Rq.T
+            Ix, Iy, Iz = I_body[0, 0], I_body[1, 1], I_body[2, 2]
+            f_fwd = mass * self.fwd_accel
+            f_rev = mass * self.rev_accel
+            f_lat = mass * self.lat_accel
+            t_roll = Ix * np.radians(self.roll_rate) / self.rot_reach_time
+            t_pitch = Iy * np.radians(self.pitch_rate) / self.rot_reach_time
+            t_yaw = Iz * np.radians(self.yaw_rate) / self.rot_reach_time
+            # scale applied to positive vs negative action (Fx is asymmetric; rest symmetric)
+            self.f_pos = np.array([f_fwd, f_lat, f_lat, t_roll, t_pitch, t_yaw])
+            self.f_neg = np.array([f_rev, f_lat, f_lat, t_roll, t_pitch, t_yaw])
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -123,24 +187,82 @@ class AsteroidBeltEnv(gym.Env):
     def _rot(self):
         return self.data.xmat[self.body_id].reshape(3, 3)
 
-    def _asteroid_positions(self):
-        if len(self.ast_geom_ids) == 0:
+    def _active_slice(self):
+        """Geom positions + radii of the currently active asteroids."""
+        n = self.n_active
+        if n == 0:
+            return np.zeros((0, 3)), np.zeros(0)
+        return self.data.geom_xpos[self.ast_geom_ids[:n]], self.ast_r[:n]
+
+    def _active_vel(self):
+        """World-frame linear velocities of the active asteroids (free-joint linear qvel)."""
+        n = self.n_active
+        if n == 0:
             return np.zeros((0, 3))
-        return self.data.geom_xpos[self.ast_geom_ids]
+        return np.stack([self.data.qvel[d:d + 3] for d in self.ast_dof_adr[:n]])
 
     def _nearest_surface_dist(self):
-        ast = self._asteroid_positions()
+        ast, r = self._active_slice()
         if len(ast) == 0:
             return np.inf
-        d = np.linalg.norm(ast - self.ship_pos, axis=1) - self.ast_radii
+        d = np.linalg.norm(ast - self.ship_pos, axis=1) - r
         return float(d.min())
 
-    def _check_collision(self):
-        for i in range(self.data.ncon):
-            c = self.data.contact[i]
-            if c.geom1 == self.ship_geom_id or c.geom2 == self.ship_geom_id:
-                return True
-        return False
+    def _radar(self, R, pos, ship_v):
+        """Body-frame full-sphere radar: per direction bin, the nearest obstacle.
+
+        Two channels per bin: proximity = 1/(1+surface_dist) (closer -> larger), and
+        closing velocity (radial, positive = approaching). No occlusion (analytic
+        binning, near does not hide far); when two rocks share a bin, the nearer wins.
+        Asteroids are treated as conservative enclosing spheres (r_eff).
+        """
+        prox = np.zeros(self.n_bins, dtype=np.float32)
+        clos = np.zeros(self.n_bins, dtype=np.float32)
+        ast, r = self._active_slice()
+        if len(ast) == 0:
+            return prox, clos
+
+        rel = ast - pos                              # world-frame relative position
+        d = np.linalg.norm(rel, axis=1)
+        d = np.maximum(d, 1e-6)
+        surf = d - r
+        rel_body = rel @ R                           # = R.T @ rel per row (into body frame)
+        az = np.arctan2(rel_body[:, 1], rel_body[:, 0])          # [-pi, pi]
+        el = np.arcsin(np.clip(rel_body[:, 2] / d, -1.0, 1.0))   # [-pi/2, pi/2]
+        az_bin = np.clip(((az + np.pi) / (2 * np.pi) * self.n_az).astype(int), 0, self.n_az - 1)
+        el_bin = np.clip(((el + np.pi / 2) / np.pi * self.n_el).astype(int), 0, self.n_el - 1)
+        flat = el_bin * self.n_az + az_bin
+
+        rel_v = self._active_vel() - ship_v          # relative velocity (world)
+        closing = -np.sum(rel * rel_v, axis=1) / d   # +ve => surface distance shrinking
+
+        # fill each bin with its nearest (smallest surf) asteroid
+        nearest = np.full(self.n_bins, np.inf)
+        for i in range(len(ast)):
+            b = flat[i]
+            if surf[i] < nearest[b]:
+                nearest[b] = surf[i]
+                prox[b] = 1.0 / (1.0 + max(surf[i], 0.0))
+                clos[b] = closing[i]
+        return prox, clos
+
+    def _capsule_collision(self):
+        """Geometric collision: ship capsule (body-X) vs asteroid conservative spheres.
+
+        Ship-asteroid physical contacts are disabled in MuJoCo (they could segfault the
+        solver at high closing speed), so 'crashing' = the capsule overlapping a rock's
+        conservative enclosing sphere (r_eff). Conservative => triggers slightly early.
+        """
+        ast, r = self._active_slice()
+        if len(ast) == 0:
+            return False
+        axis = self._rot()[:, 0]                       # ship body-X (capsule axis), unit
+        p = ast - self.ship_pos                        # asteroid centers relative to ship
+        s = np.clip(p @ axis, -self.ship_cap_h, self.ship_cap_h)
+        closest = s[:, None] * axis                    # nearest point on the capsule segment
+        d = np.linalg.norm(p - closest, axis=1)
+        surf = d - self.ship_cap_r - r
+        return bool((surf <= 0.0).any())
 
     def _obs(self):
         R = self._rot()
@@ -155,40 +277,52 @@ class AsteroidBeltEnv(gym.Env):
         goal_dist = np.linalg.norm(goal_vec)
         goal_dir = goal_vec / (goal_dist + 1e-9)
 
-        # K nearest asteroids
-        ast = self._asteroid_positions()
-        knn = np.zeros((self.k, 5), dtype=float)
-        if len(ast) > 0:
-            rel_world = ast - pos
-            d = np.linalg.norm(rel_world, axis=1)
-            order = np.argsort(d)[:self.k]
-            for slot, idx in enumerate(order):
-                rel_body = R.T @ rel_world[idx]
-                surf = d[idx] - self.ast_radii[idx]
-                knn[slot] = [rel_body[0], rel_body[1], rel_body[2], self.ast_radii[idx], surf]
+        # full-sphere body-frame radar (proximity + closing velocity per direction bin)
+        prox, clos = self._radar(R, pos, v_world)
 
         obs = np.concatenate([
             v_body, w_local, fwd, up,
             goal_dir, [goal_dist],
-            knn.reshape(-1),
+            prox, clos,
         ]).astype(np.float32)
         return obs
 
     # ------------------------------------------------------------------ gym API
+    def _place_asteroids(self, rng):
+        """Sample fresh positions/orientations/velocities for the active rocks; park the rest."""
+        cfg = self.base_cfg
+        # park everything first (far past the goal, at rest)
+        for i in range(self.n_total):
+            a = self.ast_qpos_adr[i]
+            d = self.ast_dof_adr[i]
+            self.data.qpos[a:a + 3] = [_PARK_X + 20.0 * i, 0.0, 0.0]
+            self.data.qpos[a + 3:a + 7] = [1.0, 0.0, 0.0, 0.0]
+            self.data.qvel[d:d + 6] = 0.0
+
+        n = self.n_active
+        if n == 0:
+            return
+        pos, placed = sample_belt(cfg, rng, self.ast_r[:n])
+        for slot, idx in enumerate(placed):
+            a = self.ast_qpos_adr[idx]
+            d = self.ast_dof_adr[idx]
+            self.data.qpos[a:a + 3] = pos[slot]
+            self.data.qpos[a + 3:a + 7] = np.asarray(_rand_quat(rng), dtype=float)
+            # slow drift + spin (low relative velocity)
+            dv = rng.normal(size=3); dv /= (np.linalg.norm(dv) + 1e-9)
+            wv = rng.normal(size=3); wv /= (np.linalg.norm(wv) + 1e-9)
+            self.data.qvel[d:d + 3] = dv * rng.uniform(0.0, cfg.drift_speed)
+            self.data.qvel[d + 3:d + 6] = wv * rng.uniform(0.0, cfg.spin_speed)
+
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        if self.randomize_belt:
-            self._reset_seed_counter += 1
-            cfg = BeltConfig(**{**self.base_cfg.__dict__, "seed": self._reset_seed_counter})
-            self._build(cfg)
-            if self._viewer is not None:
-                self._sync_viewer_model()
-        else:
-            mujoco.mj_resetData(self.model, self.data)
+        mujoco.mj_resetData(self.model, self.data)
 
         # ship starts at origin, identity orientation, at rest
         self.data.qpos[self.qpos_adr:self.qpos_adr + 7] = [0, 0, 0, 1, 0, 0, 0]
-        self.data.qvel[:] = 0.0
+        self.data.qvel[self.qvel_adr:self.qvel_adr + 6] = 0.0
+        # scatter the asteroids for this episode
+        self._place_asteroids(self.np_random)
         mujoco.mj_forward(self.model, self.data)
         self._steps = 0
         self._prev_goal_dist = self._goal_dist()
@@ -198,21 +332,31 @@ class AsteroidBeltEnv(gym.Env):
         return float(np.linalg.norm(np.array([self.goal_x, 0.0, 0.0]) - self.ship_pos))
 
     def set_n_asteroids(self, n):
-        """Curriculum hook: change belt density; takes effect on the next reset()."""
-        self.base_cfg.n_asteroids = int(n)
+        """Curriculum hook: change active belt density; takes effect on the next reset()."""
+        self.n_active = int(np.clip(n, 0, self.n_total))
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
-        ctrl = self.ctrl_lo + (action + 1.0) * 0.5 * (self.ctrl_hi - self.ctrl_lo)
+        if self.dynamics == "realistic":
+            ctrl = self.ctrl_lo + (action + 1.0) * 0.5 * (self.ctrl_hi - self.ctrl_lo)
+        else:
+            # sign-asymmetric scale: action=0 -> 0 force, +/-1 -> per-axis max in that direction
+            scale = np.where(action >= 0.0, self.f_pos, self.f_neg)
+            ctrl = action * scale
         self.data.ctrl[:] = 0.0
         self.data.ctrl[self.act_ids] = ctrl * self.force_scale
 
         collided = False
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
-            if self._check_collision():
+            if self._capsule_collision():
                 collided = True
                 break
+        # safety: a high-speed contact can momentarily blow up the state; treat any
+        # non-finite ship state as a collision rather than letting NaN reach the next step.
+        if not np.isfinite(self.data.qpos[self.qpos_adr:self.qpos_adr + 7]).all() or \
+           not np.isfinite(self.data.qvel[self.qvel_adr:self.qvel_adr + 6]).all():
+            collided = True
 
         self._steps += 1
         x = float(self.ship_pos[0])
@@ -235,6 +379,12 @@ class AsteroidBeltEnv(gym.Env):
         # spin penalty: keep attitude controllable so body-frame thrust stays useful
         w_local = self.data.qvel[self.qvel_adr + 3:self.qvel_adr + 6]
         reward -= self.w_spin * float(np.linalg.norm(w_local))
+        # G-load penalty: discourage sustained high linear acceleration (would kill the pilot).
+        # The ship *can* pull 10.55 G, but flying that hard is penalized above g_safe.
+        a_lin = self.data.qacc[self.qvel_adr:self.qvel_adr + 3]
+        g_load = float(np.linalg.norm(a_lin)) / 9.80665
+        if g_load > self.g_safe:
+            reward -= self.w_gload * (g_load - self.g_safe)
         reward -= self.ctrl_cost * float(np.sum(action ** 2))
         reward -= self.time_cost
 
@@ -265,17 +415,19 @@ class AsteroidBeltEnv(gym.Env):
             truncated = True
             info["outcome"] = "timeout"
 
+        if not np.isfinite(reward):
+            reward = -self.collision_penalty
+            terminated = True
+            info["outcome"] = "collision"
+
         if self.render_mode == "human":
             self.render()
-        return self._obs(), float(reward), terminated, truncated, info
+        obs = self._obs()
+        if not np.isfinite(obs).all():
+            obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+        return obs, float(reward), terminated, truncated, info
 
     # ------------------------------------------------------------------ render
-    def _sync_viewer_model(self):
-        # passive viewer is bound to a specific model/data; rebuild it
-        if self._viewer is not None:
-            self._viewer.close()
-            self._viewer = None
-
     def render(self):
         if self.render_mode == "human":
             import mujoco.viewer

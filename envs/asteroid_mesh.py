@@ -6,7 +6,7 @@ and visually reads as a rock rather than a sphere. MuJoCo loads the OBJ as a mes
 (collision uses the convex hull, which is fine; the visible surface keeps its bumps).
 
 Run once to (re)build the library:
-    conda run -n space-robotics-project python envs/asteroid_mesh.py
+    conda run -n asteroid-belt-runner python envs/asteroid_mesh.py
 Writes assets/asteroids/asteroid_0.obj ... asteroid_{N-1}.obj (unit-ish radius).
 """
 import os

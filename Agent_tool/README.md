@@ -6,5 +6,5 @@ Claude Code 用的一次性 / 辅助小工具：冒烟测试、环境 sanity che
 
 每个脚本顶部用 docstring 说明用途与运行方式。默认从仓库根目录运行：
 ```bash
-conda run -n space-robotics-project python Agent_tool/<script>.py
+conda run -n asteroid-belt-runner python Agent_tool/<script>.py
 ```

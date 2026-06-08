@@ -1,11 +1,11 @@
 """Watch a trained PPO policy fly the belt in the passive viewer.
 
 Run from repo root (needs a display):
-    conda run -n space-robotics-project python Agent_tool/rollout_viewer.py \
+    conda run -n asteroid-belt-runner python Agent_tool/rollout_viewer.py \
         --model logs/ppo_simplified/best/best_model.zip --episodes 5
 
-Uses randomize_belt=False so the MjModel/MjData persist across resets and the
-viewer handle stays valid.
+The scene is compiled once (reset only re-scatters the rocks via qpos/qvel), so the
+MjModel/MjData and the viewer handle stay valid across episodes.
 """
 import argparse
 import os

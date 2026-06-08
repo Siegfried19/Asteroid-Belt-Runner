@@ -1,7 +1,7 @@
 """Sanity-check the AsteroidBeltEnv: Gymnasium API compliance + random-action rollout.
 
 Run from repo root:
-    conda run -n space-robotics-project python Agent_tool/check_env.py
+    conda run -n asteroid-belt-runner python Agent_tool/check_env.py
 """
 import os
 import sys

@@ -1,7 +1,7 @@
 """Train a PPO controller to fly the F8C through the asteroid belt (simplified dynamics).
 
 Run from repo root:
-    conda run -n space-robotics-project python train/train_ppo.py --timesteps 1_000_000
+    conda run -n asteroid-belt-runner python train/train_ppo.py --timesteps 1_000_000
 
 Outputs (git-ignored) go under logs/<run-name>/:
     tensorboard logs, periodic checkpoints, best model, and the final model.zip.
@@ -11,7 +11,19 @@ import argparse
 import os
 import sys
 
+# Pin every process to a single math/threading lane BEFORE importing numpy/torch/mujoco.
+# With 16 SubprocVecEnv workers each spawning OpenMP/BLAS threads (+ the main process's
+# torch threads) on a many-core CPU, thread oversubscription caused rare cross-thread
+# memory corruption (segfaults / "numpy has no attribute ..." during env reset). One
+# lane per process removes the races and also improves throughput. Must precede imports.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import torch
+torch.set_num_threads(1)
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
@@ -74,6 +86,8 @@ def main():
         n_envs=args.n_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
+        # "spawn" avoids rare fork+MuJoCo+torch segfaults seen with the default forkserver
+        vec_env_kwargs=dict(start_method="spawn"),
     )
     env = VecMonitor(env, filename=os.path.join(run_dir, "monitor"))
 
