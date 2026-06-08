@@ -27,8 +27,9 @@
         type="mesh" 
         mesh="spacecraft_mesh" 
         material="ship_mat" 
-        pos="-0.01318 -1.64993 -0.06021" 
-        contype="0" 
+        pos="-1.64993 0.01318 -0.06021"
+        quat="0.7071 0 0 -0.7071"
+        contype="0"
         conaffinity="0"/>
        <site name="virtual_thruster" pos="0 0 0" euler="0 0 0" size="0.02" rgba="0 1 0 1"/>
        <camera name="chase_onbody" mode="fixed" pos="-200 0 60" euler="0 0 0"/>

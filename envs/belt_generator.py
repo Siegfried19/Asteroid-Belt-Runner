@@ -33,6 +33,7 @@ import mujoco
 import numpy as np
 
 SHIP_BODY = "spacecraft"
+PARK_X = 5000.0   # x where unplaced asteroids are parked (far past the belt, out of play)
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "assets", "asteroids")
@@ -41,22 +42,25 @@ MESHDIR_REL = os.path.join("assets", "asteroids")  # relative to environment.xml
 
 @dataclass
 class BeltConfig:
-    n_asteroids: int = 60
-    belt_x_range: tuple = (60.0, 220.0)    # slab the belt occupies along +X (game-scale, compact)
-    belt_yz_radius: float = 45.0           # asteroids scattered within this radius of the X axis
+    n_asteroids: int = 40                  # fewer, bigger rocks, with wide gaps for the 26 m ship
+    belt_x_range: tuple = (100.0, 500.0)   # slab the belt occupies along +X (ship punches through it)
+    belt_yz_radius: float = 120.0          # asteroids fill this radius of the X axis (no skirt corridor)
     # power-law size distribution: many small rocks, few large ones
-    size_min: float = 1.5                  # base radius lower bound (m)
-    size_max: float = 7.0                  # base radius upper bound (m)
+    size_min: float = 5.0                  # base radius lower bound (m) -- no tiny debris
+    size_max: float = 16.0                 # base radius upper bound (m) -- big chunks
     size_power: float = 2.5                # pdf ~ s^-power; higher -> more small rocks
     aspect_range: tuple = (0.7, 1.35)      # per-axis stretch -> irregular (non-spherical) shapes
-    min_gap: float = 1.5                   # extra clearance between asteroid surfaces (m)
+    min_gap: float = 55.0                  # min surface-to-surface clearance (m) -> wide margin for the
+                                           #   ~26 m ship collision box (gaps ~2x the ship; learnable)
     spawn_clear_radius: float = 25.0       # keep asteroids this far from the ship spawn (origin)
     # dynamics: slow drift + spin (low relative velocity, structurally realistic)
     drift_speed: float = 1.5               # max |linear v| per rock (m/s), sampled at reset
     spin_speed: float = 0.4                # max |angular v| per rock (rad/s), sampled at reset
     density: float = 2500.0               # kg/m^3 (rocky) -> mass from convex-hull volume
-    ship_collision_radius: float = 6.0     # collision-proxy capsule half-size (approx hull bound)
-    ship_collision_halflen: float = 12.0
+    # ship collision proxy = oriented box hugging the STL (nose-tail X, wingspan Y, thin Z),
+    # centred at +ship_box_cx along body-X. Collision is geometric (box vs asteroid sphere).
+    ship_box_half: tuple = (12.21, 12.83, 2.93)
+    ship_box_cx: float = 0.67
     n_mesh_library: int = 12               # how many base meshes exist in assets/asteroids/
     seed: int = 0
     asteroid_rgba: tuple = field(default_factory=lambda: (0.55, 0.5, 0.45, 1.0))
@@ -175,29 +179,41 @@ def add_belt(spec: mujoco.MjSpec, cfg: BeltConfig):
     scale = sizes[:, None] * aspect                       # per-axis mesh scale
     r_eff = sizes * aspect.max(axis=1) * mesh_rmax[lib_idx]  # conservative enclosing sphere
 
+    # Always create exactly n asteroid bodies (fixed model size). Those that fit the belt
+    # get a sampled position; any that don't fit start parked far out (the env re-places at
+    # reset). In-belt asteroids are ordered FIRST so the curriculum's "first n_active" are all
+    # in the belt.
     pos, placed = sample_belt(cfg, rng, r_eff)
-    if len(placed) < n:
-        print(f"[belt_generator] placed {len(placed)}/{n} asteroids "
-              f"(belt too dense for min_gap={cfg.min_gap}); dropping the rest.")
+    placed = [int(i) for i in placed]
+    rest = [i for i in range(n) if i not in set(placed)]
+    order = placed + rest                      # new index k -> original asteroid order[k]
+    if rest:
+        print(f"[belt_generator] {len(placed)}/{n} asteroids fit the belt "
+              f"(min_gap={cfg.min_gap}); {len(rest)} start parked.")
+
+    new_pos = np.zeros((n, 3))
+    new_pos[:, 0] = PARK_X + 30.0 * np.arange(n)   # default parked
+    new_pos[:len(placed)] = pos                    # in-belt come first, in sampled order
+    lib_idx, scale, r_eff = lib_idx[order], scale[order], r_eff[order]
 
     wb = spec.worldbody
     asteroids = []
-    for slot, idx in enumerate(placed):
-        mesh_name = f"ast_mesh_{slot}"
+    for k in range(n):
+        mesh_name = f"ast_mesh_{k}"
         m = spec.add_mesh()
         m.name = mesh_name
-        m.file = os.path.join(MESHDIR_REL, f"asteroid_{int(lib_idx[idx])}.obj")
-        m.scale = [float(scale[idx, 0]), float(scale[idx, 1]), float(scale[idx, 2])]
+        m.file = os.path.join(MESHDIR_REL, f"asteroid_{int(lib_idx[k])}.obj")
+        m.scale = [float(scale[k, 0]), float(scale[k, 1]), float(scale[k, 2])]
 
         quat = _rand_quat(rng)
         body = wb.add_body()
-        body.name = f"asteroid_{slot}"
-        body.pos = [float(pos[slot, 0]), float(pos[slot, 1]), float(pos[slot, 2])]
+        body.name = f"asteroid_{k}"
+        body.pos = [float(new_pos[k, 0]), float(new_pos[k, 1]), float(new_pos[k, 2])]
         body.quat = list(quat)
         jnt = body.add_freejoint()
-        jnt.name = f"ast_joint_{slot}"
+        jnt.name = f"ast_joint_{k}"
         g = body.add_geom()
-        g.name = f"ast_geom_{slot}"
+        g.name = f"ast_geom_{k}"
         g.type = mujoco.mjtGeom.mjGEOM_MESH
         g.meshname = mesh_name
         g.rgba = list(cfg.asteroid_rgba)
@@ -205,20 +221,19 @@ def add_belt(spec: mujoco.MjSpec, cfg: BeltConfig):
         g.contype = AST_CONTYPE
         g.conaffinity = AST_CONAFFINITY
         asteroids.append(Asteroid(
-            body=body.name, geom=g.name, joint=jnt.name, r_eff=float(r_eff[idx]),
-            pos=tuple(pos[slot]), quat=quat))
+            body=body.name, geom=g.name, joint=jnt.name, r_eff=float(r_eff[k]),
+            pos=tuple(new_pos[k]), quat=quat))
     return asteroids
 
 
 def add_ship_collision(spec: mujoco.MjSpec, cfg: BeltConfig):
-    """Attach a collision-proxy capsule to the ship body (the STL geom is visual-only)."""
+    """Attach a collision-proxy box hugging the ship body (the STL geom is visual-only)."""
     ship = spec.body(SHIP_BODY)
     proxy = ship.add_geom()
     proxy.name = "ship_collision"
-    proxy.type = mujoco.mjtGeom.mjGEOM_CAPSULE
-    # capsule along the ship's body-X (forward) axis
-    proxy.fromto = [-cfg.ship_collision_halflen, 0, 0, cfg.ship_collision_halflen, 0, 0]
-    proxy.size = [cfg.ship_collision_radius, 0, 0]
+    proxy.type = mujoco.mjtGeom.mjGEOM_BOX
+    proxy.size = list(cfg.ship_box_half)            # half-extents (nose-tail, wingspan, thickness)
+    proxy.pos = [cfg.ship_box_cx, 0.0, 0.0]         # box centre offset along body-X
     proxy.contype = SHIP_CONTYPE
     proxy.conaffinity = SHIP_CONAFFINITY
     proxy.rgba = [0.2, 0.8, 1.0, 0.0]  # invisible by default

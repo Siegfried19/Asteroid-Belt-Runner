@@ -21,6 +21,7 @@ runs/
 checkpoints/
 MUJOCO_LOG.TXT
 *.zip
+!models/*.zip          # keep curated/best model snapshots (small) tracked for cross-machine use
 wandb/
 
 # Editors / OS

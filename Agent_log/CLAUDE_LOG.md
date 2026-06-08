@@ -88,6 +88,85 @@
   env_checker 通过 + 20 集随机 rollout 正常。新机器可跑。
 - 注：仍未补 `requirements-rl.txt`（待 R10）。仓库状态不变，重建断点仍在 **R2**。
 
+## 2026-06-08 — ✅ 大带学会穿越(41%)+ 崩溃根治(forkserver)+ 真凶=flaky sre_compile
+
+- **崩溃真凶最终定论**:不是内存/陨石/envs/reset——是这个 conda 环境的 **CPython `sre_compile`(正则编译)
+  偶发损坏**,谁在 import 时编译复杂正则都可能挂(torch、torch._dynamo、matplotlib、gymnasium 都中过招),
+  报各种怪异解包错(`too many values to unpack`)。**只在 import/启动期发作,跑起来就没事。**
+- **根治三连**:①start_method=**forkserver**(干净服务进程 import 一次、worker 从它 fork,不重复踩、也不
+  fork-after-CUDA 死锁);②torch/SB3 移进 `main()`(worker 完全不碰 torch);③`_warm_import` 重试预热
+  torch._dynamo/matplotlib + wrapper 重启兜主进程启动偶发。**v15 forkserver 全程跑满 3M,只崩 2 次。**
+  (踩坑记录:spawn→每个worker重复import狂崩;fork→fork-after-CUDA死锁hang;forkserver 才对。)
+- **带最终定型**(为"可学"放宽):n=40(带内~31)、min_gap **55**(缝~58m,对 26m 盒子碰撞飞机有 ~32m 余量,
+  缝≈2.2×飞机)、半径120×长400、盒子碰撞贴STL(机翼算)。之前 min_gap32(缝仅4m余量)= 飞机挤不过→0%。
+- **v15 训练**(课程8→40,3M):**1.5M checkpoint 达峰 SUCCESS 41% / 出界 0% / 碰撞 59%**(100集)——
+  学会从缝里穿、不再侧漂钻空子(对比旧"绕飞带"的假100%)。**后段发散**(2M→0%),典型 PPO 后段不稳;
+  resume 重置了 EvalCallback best 记录,故手动挑 1.5M checkpoint 存为 `best/best_model.zip`。
+- **主力模型**:`logs/ppo_rebuild_v15/best/best_model.zip`(=1.5M checkpoint,41%)。改进方向:早停/降LR 治后段
+  发散、proximity reward 降碰撞率。看回放:`Agent_tool/watch.sh logs/ppo_rebuild_v15/best/best_model.zip 30 40`。
+
+## 2026-06-08 — ⚠️ 崩溃真凶 = torch dynamo 正则 bug（不是内存/陨石/envs）
+
+- **重大纠错**:之前 v5–v10 把频繁崩溃归因为"陨石多/envs多/reset重采样的内存损坏"——**全错**。
+  v11 抓到完整 traceback:两次崩溃**都在 `torch._dynamo/skipfiles.py → re.compile → sre_compile`**,
+  报 `ValueError: too many values to unpack (expected 0/92)`。这是 **torch 2.2.1 + Python 3.10 的
+  TorchDynamo 正则编译 bug**(偶发),和陨石/MuJoCo/我的代码都无关。
+- **为何一直没发现**:最初第一次训练就是这个错,我当时用 `TORCHDYNAMO_DISABLE=1` 绕过,早期
+  v1–v4 都带它(v4 干净跑完 3M)。**但 `train_resilient.sh` 漏设了这个变量** → v5–v11 全裸奔踩坑。
+  envs/陨石越多只是触发概率越高,造成"内存随规模损坏"的假象。
+- **根治**:`train_ppo.py` 顶部 `os.environ.setdefault("TORCHDYNAMO_DISABLE","1")`(import torch 前)
+  + `train_resilient.sh` export 同样变量。我们从不用 torch.compile,直接禁用 Dynamo 无副作用。
+- **附带收获仍有效**:这轮排查顺手做的 min_gap32(保证可穿)、盒子碰撞(贴 STL/机翼算)、廉价 reset
+  (build布局+旋转,1.1ms,50×快)、固定 body 数(72,69入带3停泊)都是真改进,保留。
+- 启动 **v11**(72颗/缝≥30/盒子碰撞/dynamo修复/课程20→72/3M)验证全程无崩 + 能否学会穿越。
+
+## 2026-06-08 — 缝隙/碰撞体诊断 + 廉价 reset 根治崩溃（v8/v9 → v10）
+
+- **v5–v8 反复在大带上学不会**(eval 下滑、0% 成功)。诊断 v8 best(90颗大石头):0%成功、**70% 侧向出界**、
+  30%碰撞,**平均只飞到 x=127**(刚进带口就垮)。根因不是训练,是**带本身堵死**:
+- **缝隙诊断**(用户提出):最近邻表面间隙**中位仅 13m < 石头直径 27m**,**48% 的缝 < 飞机碰撞径 12m**——
+  飞机物理上钻不过近一半的窄缝。根因:`min_gap` 只有 1.5m,大石头挤成团。→ **min_gap 1.5→32m**,
+  保证每条缝 ≥32m > 飞机宽度(0% 穿不过)。
+- **碰撞体改盒子**(用户问"碰撞球怎么算的、能否贴 STL"):原是 12m 胶囊、**忽略机翼**。STL 是扁宽板
+  (24×26×6m),胶囊裹不住 → 改**贴紧的 OBB 盒子** half-extents(12.21,12.83,2.93)、中心 X+0.67,
+  机翼现在算碰撞(`_box_collision` 盒-球检测)。飞机有效宽度 12→26m。配套放宽侧向边界 oob_margin 12→**25**
+  (盖住飞机半宽 13m + 机动)。`add_ship_collision` 改 box geom;BeltConfig 用 `ship_box_half/ship_box_cx`。
+- **廉价 reset 根治崩溃**:v9(min_gap32)崩溃暴增到**每 58k 一次**——min_gap 越大,`sample_belt` 每次 reset
+  的拒绝采样越疯狂,正是崩溃主因。→ **建场时预算 16 套布局,reset 只挑一套 + 随机绕 X 轴旋转**(O(N))。
+  reset 1.3ms(快 ~50×)、建场 1.5s。`_precompute_layouts` + 重写 `_place_asteroids`,不再每 reset 重采样。
+- 注:min_gap 32 较紧,带内实际 ~75 颗(其余停泊界外)。启动 **v10** 验证(廉价 reset 后崩溃应大降)。
+
+## 2026-06-08 — 飞机朝向修正 + 大带重设计（可视化迭代）→ v7
+
+- **飞机朝向 bug**：用户目视发现机头朝绿轴(+Y),但 env 以 +X 为前向(推力/目标/reward 全按 +X)→ 飞船"侧着飞"。
+  STL 机头沿 mesh -Z、翼展 Y、厚度 X。**踩坑**：先用 `euler` 修,被 MuJoCo 的 mesh 内部帧/`model.geom_quat`
+  误导,渲出来还是错。改用**离屏渲染(EGL)+ 真实渲染矩阵 `data.geom_xmat`** 验证才靠谱:正确解 = 绕 Z 转 −90°
+  (`quat="0.7071 0 0 -0.7071"`,pos 同步转正保持居中)。机头→+X(红)、翼→Y(绿)、顶→+Z(蓝)。纯视觉,不动物理。
+- **可视化迭代工具**：`Agent_tool/watch.sh`(一条命令开 viewer);离屏渲 PNG + Read 自查朝向(俯视/iso)。
+- **大带重设计**(用户驱动,反复 preview 调):原带太小→飞船绕外缘作弊(v4 100% 是钻空子)。
+  最终:**半径 120 × 长 400(x 100→500)、目标 x=540、出界 rho>132**。密度按"平均间距 ≥ 飞机尺寸的倍数"定——
+  飞机包络球直径 ≈ 30m / 碰撞横截面 12m;用户选"间距 43m ≈ 3.5× 碰撞径 / 1.5× 包络球"(从容可穿)→ **N=230**。
+  关键数据:旧 600 颗间距才 20m < 飞机 30m = 根本钻不过(必 0%);故重设密度。
+- **启动 v7**:`train_resilient.sh ppo_rebuild_v7 3000000 230 --curriculum --n-start 30 --max-steps 3000`
+  (带变长→max_steps 1500→3000)。抗崩溃续跑。待评估。
+- 注:v2/v4 是旧小带模型,已过时;v7 是新大带主力。`environment.xml` 加了 geom quat/pos(朝向);belt_generator
+  尺寸/密度更新。check_env 双模式过(随机动作多 timeout,因带稀疏目标远,符合预期)。
+
+## 2026-06-08 — 发现 v4 在"绕飞"作弊 + 加宽带 + 抗崩溃训练（v5→v6）
+
+- **用户目视 v4 viewer 发现陨石带太小、飞船绕外缘飞过、没真穿越**。诊断坐实：带半径 45，但飞船穿越带
+  x 区间时**平均侧偏 72**(远在带外)、最大 92——出界边界宽到 105 留了"绕行走廊"，100% 0 碰撞是钻空子。
+- **修带几何(真·穿越)**：belt_yz_radius 45→**55**(填满横截面)、出界侧向余量 60→**12**(env 新增 `oob_yz_margin`，
+  rho>67 即出界、堵死绕行)、n_asteroids 60→**90**(更密)。check_env 过(随机动作几乎绕不过、碰撞率高)。
+- **保存渲染脚本** `Agent_tool/watch.sh`(封装 DISPLAY/conda，一条命令开 viewer)。用户远程桌面 DISPLAY=:1 可用，
+  EGL 离屏渲染也可(4090)。
+- **v5(新带)~450k 又段错误**——单线程没根治(v4 60颗干净跑完、v5 90颗 450k 崩；陨石多→episode 短→reset 频繁→
+  `sample_belt` 高频→撞上罕见非确定性内存损坏)。判定：与其根治这个跨子系统的罕见崩溃，不如**让训练能从崩溃恢复**。
+- **抗崩溃训练**：train_ppo.py 加 `--resume`(从 run 目录最新 ckpt 续，`reset_num_timesteps=False`，课程接续)；
+  `Agent_tool/train_resilient.sh` 包装重试循环(崩了自动 --resume，最多 12 次，直到"saved final model")。resume 已验证。
+- 删崩溃的 v5；启动 **v6**(`train_resilient.sh ppo_rebuild_v6 3000000 90 --curriculum --n-start 10`)。待评估新带真实成功率。
+- v4(旧带 100%)保留——但属"绕飞带"，新主力将是 v6(真穿越带)。
+
 ## 2026-06-08 — ✅ v4 完美收官：100% 成功率，全程 3M 无崩
 
 - **v4(单线程 + 几何碰撞，3M 步)干净跑完**：env steps 3.01M、60 次 eval、"saved final model"，**零崩溃**——

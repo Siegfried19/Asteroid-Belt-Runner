@@ -51,11 +51,24 @@
 - [ ] **R10 真实 17 推进器训练（Phase 6）+ 文档**：`--dynamics realistic` 训练并与简化对比；
       更新 `CLAUDE.md`/`PROJECT_PLAN.md`/`CLAUDE_LOG.md`；补 `requirements-rl.txt`。
 
-## 当前进度（断点）
-**R1–R7 完成**（土豆带 / 重摆 reset / 雷达 obs / F8C 力标定 / G-load 奖励 / 工具更新，check_env 双模式过）。
-**下一步 = R8：冒烟训练 → 课程 PPO 正式训练 → eval_policy 看成功率。**
+## 当前进度（断点）— 2026-06-08 大重设计后
+**简化动力学控制器已学会穿越大带：v15 = SUCCESS 41% / 出界 0% / 碰撞 59%**（满密度 100 集）。
+主力模型 = `models/ppo_v15_best_41pct.zip`（=v15 的 1.5M checkpoint，后段发散故手动挑峰值）。
+
+**带最终定型**（见 `belt_generator.BeltConfig` 默认值）：n=40(带内~31)、min_gap=55(缝~58m)、半径120×长400、
+goal x=540、盒子碰撞贴 STL(机翼算，~26m 宽)、oob_margin=25、廉价 reset(预算布局+绕X轴旋转)。
+
+**崩溃已根治**（关键，换机器务必保留）：本环境 CPython `sre_compile` 偶发损坏，import 期发作。
+train_ppo.py 已用 **forkserver + torch 移进 main() + _warm_import 重试**；长训用 `Agent_tool/train_resilient.sh`
+(崩了自动 --resume)。**别改回 spawn(狂崩)或 fork(死锁)。** 详见 `CLAUDE_LOG.md` 顶部。
+
+**改进方向（下一步可选）**：① 治后段发散(早停/降LR，让它稳在/超过 47%)；② 降碰撞(调 proximity 奖励)；
+③ R9 键盘飞控；④ R10 真实 17 推进器训练(`--dynamics realistic`)。
 
 ## 环境与命令
-- conda env：`asteroid-belt-runner`（MuJoCo 3.3.7 / Gymnasium 0.29.1 / SB3 2.3.0 / torch 2.2.1）。
+- conda env：`asteroid-belt-runner`（MuJoCo 3.3.7 / Gymnasium 0.29.1 / SB3 2.3.0 / torch 2.2.1，numpy<2）。
+  换机器照 `CLAUDE.md` Setup 段重建同名 env。
+- 长训：`Agent_tool/train_resilient.sh ppo_<name> 3000000 40 --curriculum --n-start 8 --max-steps 3000`
+- 评估：`conda run -n asteroid-belt-runner python Agent_tool/eval_policy.py --model models/ppo_v15_best_41pct.zip --episodes 100 --n-asteroids 40`
+- 回放(需显示器)：`Agent_tool/watch.sh models/ppo_v15_best_41pct.zip 30 40`
 - 重新生成网格：`conda run -n asteroid-belt-runner python envs/asteroid_mesh.py`
-- 训练/评估命令见 `PROJECT_PLAN.md` 末尾速查。

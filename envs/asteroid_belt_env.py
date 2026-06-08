@@ -46,6 +46,8 @@ class AsteroidBeltEnv(gym.Env):
         max_steps: int = 1500,
         frame_skip: int = 5,
         force_scale: float = 1.0,
+        oob_yz_margin: float = 25.0,  # lateral room beyond the belt edge before OOB (covers the
+                                      #   ~13 m ship half-width + maneuvering; still no skirt corridor)
         # F8C-calibrated simplified-dynamics limits (decoupled from the XML envelope):
         fwd_accel: float = 103.5,   # main thrust +X (m/s^2, 10.55 G)
         rev_accel: float = 36.3,    # retro/brake -X (m/s^2, 3.70 G) -- asymmetric
@@ -80,6 +82,7 @@ class AsteroidBeltEnv(gym.Env):
         self.max_steps = max_steps
         self.frame_skip = frame_skip
         self.force_scale = force_scale
+        self.oob_yz_margin = oob_yz_margin
         self.fwd_accel = fwd_accel
         self.rev_accel = rev_accel
         self.lat_accel = lat_accel
@@ -130,10 +133,10 @@ class AsteroidBeltEnv(gym.Env):
         self.ship_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "ship_collision"
         )
-        # ship collision capsule (body-X axis) — collisions are detected geometrically
-        # against the asteroids' conservative enclosing spheres (r_eff), see _capsule_collision.
-        self.ship_cap_r = float(self.base_cfg.ship_collision_radius)
-        self.ship_cap_h = float(self.base_cfg.ship_collision_halflen)
+        # ship collision proxy = oriented box hugging the STL — collisions are detected
+        # geometrically against the asteroids' conservative spheres (r_eff), see _box_collision.
+        self.ship_box_half = np.asarray(self.base_cfg.ship_box_half, dtype=float)
+        self.ship_box_center = np.array([self.base_cfg.ship_box_cx, 0.0, 0.0])
 
         # per-asteroid handles (build order), and free-joint qpos/dof addresses
         self.n_total = len(self.asteroids)
@@ -145,6 +148,11 @@ class AsteroidBeltEnv(gym.Env):
                     for a in self.asteroids]
         self.ast_qpos_adr = np.array([self.model.jnt_qposadr[j] for j in ast_jids], dtype=int)
         self.ast_dof_adr = np.array([self.model.jnt_dofadr[j] for j in ast_jids], dtype=int)
+
+        # Canonical belt layout from the build (in-belt asteroids first). reset() rotates this
+        # about the X axis -> O(N) cheap reset, NO per-reset rejection sampling (which was both
+        # slow and the source of the memory-corruption crashes).
+        self._base_layout = np.array([a.pos for a in self.asteroids], dtype=float)
 
         # which actuators this env commands, and their ctrl ranges
         if self.dynamics == "realistic":
@@ -246,23 +254,21 @@ class AsteroidBeltEnv(gym.Env):
                 clos[b] = closing[i]
         return prox, clos
 
-    def _capsule_collision(self):
-        """Geometric collision: ship capsule (body-X) vs asteroid conservative spheres.
+    def _box_collision(self):
+        """Geometric collision: ship oriented box (hugging the STL) vs asteroid spheres.
 
         Ship-asteroid physical contacts are disabled in MuJoCo (they could segfault the
-        solver at high closing speed), so 'crashing' = the capsule overlapping a rock's
-        conservative enclosing sphere (r_eff). Conservative => triggers slightly early.
+        solver at high closing speed), so 'crashing' = a rock's conservative sphere (r_eff)
+        overlapping the ship's oriented bounding box (nose-tail x wingspan x thickness).
         """
         ast, r = self._active_slice()
         if len(ast) == 0:
             return False
-        axis = self._rot()[:, 0]                       # ship body-X (capsule axis), unit
-        p = ast - self.ship_pos                        # asteroid centers relative to ship
-        s = np.clip(p @ axis, -self.ship_cap_h, self.ship_cap_h)
-        closest = s[:, None] * axis                    # nearest point on the capsule segment
-        d = np.linalg.norm(p - closest, axis=1)
-        surf = d - self.ship_cap_r - r
-        return bool((surf <= 0.0).any())
+        R = self._rot()
+        p = (ast - self.ship_pos) @ R - self.ship_box_center   # asteroid centers in ship-box frame
+        q = np.abs(p) - self.ship_box_half                     # per-axis distance outside the box
+        d = np.linalg.norm(np.maximum(q, 0.0), axis=1)         # point-to-box distance (0 if inside)
+        return bool((d - r <= 0.0).any())
 
     def _obs(self):
         R = self._rot()
@@ -289,26 +295,25 @@ class AsteroidBeltEnv(gym.Env):
 
     # ------------------------------------------------------------------ gym API
     def _place_asteroids(self, rng):
-        """Sample fresh positions/orientations/velocities for the active rocks; park the rest."""
-        cfg = self.base_cfg
+        """Cheap reset: take the build layout, rotate it about X, write qpos/qvel. O(N)."""
         # park everything first (far past the goal, at rest)
         for i in range(self.n_total):
-            a = self.ast_qpos_adr[i]
-            d = self.ast_dof_adr[i]
-            self.data.qpos[a:a + 3] = [_PARK_X + 20.0 * i, 0.0, 0.0]
+            a, d = self.ast_qpos_adr[i], self.ast_dof_adr[i]
+            self.data.qpos[a:a + 3] = [_PARK_X + 30.0 * i, 0.0, 0.0]
             self.data.qpos[a + 3:a + 7] = [1.0, 0.0, 0.0, 0.0]
             self.data.qvel[d:d + 6] = 0.0
 
         n = self.n_active
         if n == 0:
             return
-        pos, placed = sample_belt(cfg, rng, self.ast_r[:n])
-        for slot, idx in enumerate(placed):
-            a = self.ast_qpos_adr[idx]
-            d = self.ast_dof_adr[idx]
-            self.data.qpos[a:a + 3] = pos[slot]
+        th = rng.uniform(0.0, 2.0 * np.pi)           # rotate the whole belt about X for variety
+        ct, st = np.cos(th), np.sin(th)
+        cfg = self.base_cfg
+        for i in range(n):
+            px, py, pz = self._base_layout[i]
+            a, d = self.ast_qpos_adr[i], self.ast_dof_adr[i]
+            self.data.qpos[a:a + 3] = [px, py * ct - pz * st, py * st + pz * ct]
             self.data.qpos[a + 3:a + 7] = np.asarray(_rand_quat(rng), dtype=float)
-            # slow drift + spin (low relative velocity)
             dv = rng.normal(size=3); dv /= (np.linalg.norm(dv) + 1e-9)
             wv = rng.normal(size=3); wv /= (np.linalg.norm(wv) + 1e-9)
             self.data.qvel[d:d + 3] = dv * rng.uniform(0.0, cfg.drift_speed)
@@ -349,7 +354,7 @@ class AsteroidBeltEnv(gym.Env):
         collided = False
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
-            if self._capsule_collision():
+            if self._box_collision():
                 collided = True
                 break
         # safety: a high-speed contact can momentarily blow up the state; treat any
@@ -395,7 +400,7 @@ class AsteroidBeltEnv(gym.Env):
         rho_yz = np.linalg.norm(pos[1:3])
         oob = (
             x < -50.0
-            or rho_yz > self.base_cfg.belt_yz_radius + 60.0
+            or rho_yz > self.base_cfg.belt_yz_radius + self.oob_yz_margin
             or x > self.goal_x + 30.0
         )
 
