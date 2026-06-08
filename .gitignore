@@ -1,1 +1,32 @@
-/__pycache__
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.env/
+
+# Caches / build
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Training outputs & runtime logs (NOT Agent_log/ — that is tracked on purpose)
+logs/
+runs/
+checkpoints/
+MUJOCO_LOG.TXT
+*.zip
+wandb/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# stray redirected output
+*.out
