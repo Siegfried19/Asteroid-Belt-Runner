@@ -411,3 +411,44 @@ numpy corruption)、.gitignore(.belt_cache/)、rollout_viewer(+--exit-r)、日�
 - **未 commit**：train_ppo（--init-from/--belt-len/--goal-mode/--arrival-speed/auto max_steps）、asteroid_belt_env
   （goal_mode + 内部点采样 + 到达档位 + belt_far_x）、eval_policy/rollout_viewer（透传）、CLAUDE.md/PROJECT_PLAN/本 log。
   训练产物 `logs/ppo_warmstart_n80_0609`（git-ignored）。**等 n80 训练结果出来再决定 commit/留模型。**
+
+## 2026-06-09 — 诊断"63% 是否真会避障"(否) + 加软速度上限(学习式,不硬 clamp)
+
+用户看渲染怀疑"成功多半是面前没石头直接穿过去",且问初始化是否给了大速度/加速度、net 输出是什么。逐一查实：
+- **初始条件**:`reset()` 飞船**静止起步**（qpos 原点+单位四元数,qvel 线/角速度全 0）。撞**不是**初速度 kick。
+- **net 输出**:512² MlpPolicy 出 **6 维 [-1,1]**（确定性=高斯均值,env clip）→ 映射力/力矩,符号非对称:
+  `[0]`前后 +1=**103.5 m/s²(10.55G)主推** / -1=36.3 反推;`[1][2]`侧向±40;`[3][4][5]`滚/俯/偏力矩(2s 到 140/38/35°/s)。
+  `action=0→零力`。**最大加速度本身巨大**(F8C 规格)→ 策略学会猛踩前推飙到一两百 m/s → 来不及躲就撞。
+- **诊断脚本 `Agent_tool/diag_weaving.py`**(新增,git-tracked):
+  - Part A(clear-lane 相关):n40/exit0 100 集,成功集**最大横向偏移仅均值 31.7m/中位 31.1/最高 43**(带半径 180m)
+    → 只小幅穿插钻缝,不做大幅绕。("轴通畅/堵"二分因 r_eff~25 大石头几乎总判"堵"而失效,但 max-lateral 已说明问题)。
+  - **Part B(强制单障碍,因果决定性)**:park 全部、只在轴上 x=200/350/500 各放**一颗**石头挡路,飞船只需绕一颗即可——
+    **三处全 0% 成功、100% 撞**。即正前方有障碍它直撞、完全不会绕(左右对称+雷达无左右偏好→对称瘫痪)。
+  - **结论**:模型**没有真正避障**;57-63% 本质=随机带子通常在轴附近留了条 ~30m 能钻的缝,非稳健避障。
+    n80 失败=加密把缝堵上→小幅穿插不够→退化逃跑,完全自洽。
+- **修复方向(用户拍板:可设速度上限,但不能硬截,要让它自己学)**:env 加**软超速惩罚**(非 clamp qvel):
+  `speed>v_soft 时 reward -= w_overspeed*(speed-v_soft)`。默认 **v_soft=60, w_overspeed=0.02 ON**(冲太快没时间避障的路堵死,
+  逼它自学松油门;飞船物理上仍能飞快)。train_ppo 加 `--v-soft/--w-overspeed`,make_env_fn 透传。
+  验证:开/关都仍冲到 124 m/s(确认不截速),@150 m/s 每步扣 ~1.8(确认生效)。
+- **下一步(未做,待用户定)**:单障碍避让 curriculum(直接从 Part B 起训) + 重启 off-axis 出口(强制绕);再正式训练。
+- **未 commit**:asteroid_belt_env(软超速惩罚)、train_ppo(--v-soft/--w-overspeed)、diag_weaving.py、本 log。
+
+## 2026-06-09 — 速度改"自学"(关全局软上限) + 单障碍 weaving curriculum（实现+冒烟，待训练）
+
+用户强调"速度上限要它自己学出来,不是我们给的硬限制"。据此调整 + 落地 weaving 课程(建 todolist 逐步做)。
+- **任务1 全局软速度上限默认关**:`w_overspeed` 默认 0.02→**0.0**(env + train_ppo `--w-overspeed` 默认 0)。
+  保留作可选消融开关(非 clamp)。**主力"自学减速"信号=已有的 `w_closing`**(只罚"朝近石头冲快"的逼近速度,
+  空旷飞多快都不罚)+ 碰撞后果→飞船自己学情境化速度,我们不拍 60m/s 这个数。
+- **任务2 env 单障碍 blocker curriculum**:新增 `n_blockers`/`blocker_jitter` + `set_n_blockers/set_blocker_jitter`
+  钩子 + `_place_blockers()`:reset 里(goal 定后)把前 n_blockers 颗 active 石头**强制摆到 start→goal 路径上**
+  (沿路径均匀分布 t=(i+1)/(nb+1)),每颗按 jitter 在垂直路径平面内偏移(jitter 大=偏一侧好绕/易,0=正中需破对称/难)。
+  对 traverse 和 interior_point 都通用(路径=start→self.goal)。默认 n_blockers=0→行为不变。
+- **任务3 冒烟**:1 blocker jitter0 正中路径(dist 0.0,x=中点);2 blockers jitter25 都≤25且沿路径 1/3,2/3;
+  off-axis 目标时 blocker 贴斜路径(dist 0.0);**63% 模型对单正中 blocker 5/5 全撞**(=baseline,印证 diag Part B)。
+- **任务4 接入 train_ppo**:`make_env_fn` 重构为 `env_kwargs` 字典(收拢 goal_mode/arrival/v_soft/w_overspeed/
+  n_blockers/blocker_jitter);CLI 加 `--n-blockers/--n-blockers-start/--blocker-jitter/--blocker-jitter-start`;
+  `CurriculumCallback` 扩展 ramp blockers(nb 1→K)+jitter(大→小),与密度/偏离/航程同步(触发键改 (n,nb))。
+  验证:env_kwargs 建 env OK、ramp 数学 frac0→1 给 blockers 1→2→3 / jitter 40→0。
+- **新增 `Agent_tool/diag_weaving.py`**(上一段会话留下,本段沿用):量横向偏移 + 强制单障碍测避障。
+- **未 commit**:asteroid_belt_env(blocker+软上限默认关)、train_ppo(env_kwargs+blocker CLI+callback)、
+  diag_weaving.py、CLAUDE.md/PROJECT_PLAN/本 log。**待用户发令:warm-start 63% + weaving curriculum 起训。**

@@ -83,6 +83,20 @@
   `belt_generator` 布局磁盘缓存（绕高密度 numpy corruption）；`render_scene.py` 离屏出图；场景 600m×180m。
 - **下一步二选一**：①降 n40 碰撞 或 ②推 curriculum 加难（密度 40→80→135 / `goal_radius` 60→35 / off-axis 0→150）。
 
+### 2026-06-09 续：n80 失败 + 发现"63% 是虚高、没真避障" → weaving curriculum（代码已就绪，待训练）
+- **n80 热启动训练失败**：满 n80=0% success、final 模型 **100% 出界**（退化成"逃出界"避障）。根因=reward 平衡
+  （`oob_penalty 200 < collision 600`，逃跑比硬穿便宜）+ 密度跳太陡，**非容量问题**。
+- **关键诊断（`Agent_tool/diag_weaving.py`）**：63% 模型**没有真正避障**——成功集横向偏移仅 ~30m（带半径 180），
+  且**正前方放一颗石头 → 100% 直撞、0% 能绕**（左右对称瘫痪）。**63% 本质=随机带子通常在轴附近留了条 ~30m 能钻的缝**，
+  不是稳健避障；n80 把缝堵上就崩。
+- **修复方向（用户拍板）**：①**速度自学**——不硬截 qvel、全局软速度上限默认关，靠 `w_closing`（只罚"朝石头冲快"，
+  空旷不罚）+ 碰撞后果让它自己学会该慢则慢；②**单障碍 weaving curriculum**——`n_blockers`/`blocker_jitter` 强制把
+  石头摆在 start→goal 路径上（1→K 颗、jitter 大→小=偏置→正中），逼它先学会绕一颗再加难。已实现并冒烟验证
+  （blocker 准确落在路径上；63% 模型对单正中 blocker 5/5 全撞=baseline）。`train_ppo --n-blockers/--blocker-jitter
+  (+-start)` 接入 CurriculumCallback（与密度/偏离/航程同步爬）。
+- **下一步**：warm-start 63% 模型 + weaving curriculum（blocker 1→K、jitter 大→小、密度 稀→n40）训练，
+  测 final model.zip（既测 blocker 场景也测普通 n40）。**待用户发令起训。**
+
 ### 新任务方向（2026-06-09 用户提出；**代码已实现，待训练**；详见 CLAUDE_LOG）
 - [x] **加长陨石带（实现）**：`train_ppo.py --belt-len FAR` 设 `belt_x_range=(100,FAR)`，`--max-steps` 默认
       **按带长自动放宽**（`2200×FAR/700`，下限 2200，只严重超时才截断）。`--n-asteroids` 自己按比例加保密度。

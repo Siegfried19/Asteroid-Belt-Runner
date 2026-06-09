@@ -99,10 +99,18 @@ Because the live path sets `qvel` directly, the six XML actuators are not curren
   `"interior_point"` (a random, min-depth + clearance-checked target INSIDE the belt; arrival tiers via
   `arrival_speed` / `arrival_speed_random` — the latter appends the target speed to obs -> 161). Both
   share the same obs/action, so a traverse-trained net warm-starts onto either.
+  **Weaving curriculum** (`n_blockers`/`blocker_jitter` + `set_*` hooks): force N asteroids dead onto the
+  start->goal path so there is GUARANTEED an obstacle to go around — the skill the scattered belt never
+  taught (diag_weaving showed the 63% model rams a lone on-axis rock 100%). jitter large->small =
+  off-to-one-side (easy) -> dead-centre (must break symmetry). **Speed is meant to be self-learned**: no
+  hard qvel clamp and the global soft cap (`w_overspeed`) is OFF by default; the grounded signal is
+  `w_closing` (taxes closing FAST on a rock, leaves open-space cruising free) + the crash penalty.
 - **`train/train_ppo.py`** — SB3 PPO over `SubprocVecEnv`, checkpoints/best-model/tensorboard to `logs/`.
   `--init-from <model.zip>` warm-starts a new run from a trained policy (net_arch follows the donor;
   only works while obs/action stay fixed — i.e. not the 6->17 realistic switch). `--belt-len` lengthens
-  the belt (step budget auto-scales); `--goal-mode`/`--arrival-speed` select the interior-point task.
+  the belt (step budget auto-scales); `--goal-mode`/`--arrival-speed` select the interior-point task;
+  `--n-blockers`/`--blocker-jitter` (+ `-start`) drive the weaving curriculum (ramped by CurriculumCallback
+  alongside density/exit/traverse). `diag_weaving.py` measures whether a model actually weaves.
 - **`envs/thruster_layout.py`** — the 17 realistic thrusters (Roadmap #3), built; training on them is R10.
 
 ### Conventions

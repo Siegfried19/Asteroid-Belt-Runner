@@ -78,6 +78,14 @@ class AsteroidBeltEnv(gym.Env):
         # per-episode random target, appended to the obs so the agent can comply (tier 3).
         arrival_speed: float = None,
         arrival_speed_random: tuple = None,
+        # single-obstacle "blocker" curriculum: force n_blockers asteroids onto the start->goal path
+        # (evenly spread) so there is GUARANTEED something in the way -> the agent must learn to weave
+        # around it, the skill the scattered belt never reliably taught (diag_weaving Part B: 0% on a
+        # lone on-axis rock). blocker_jitter offsets each off the path line: large = off to one side
+        # (easy, obvious dodge), 0 = dead-centre (hard, must break left/right symmetry). Curriculum:
+        # blockers 1->K and jitter large->small.
+        n_blockers: int = 0,
+        blocker_jitter: float = 0.0,
         randomize_belt: bool = True,
         render_mode: str = None,
         # reward weights
@@ -91,6 +99,14 @@ class AsteroidBeltEnv(gym.Env):
         w_spin: float = 0.01,       # penalty on |angular velocity| (keep attitude controllable)
         w_gload: float = 0.15,      # penalty on linear G-load above g_safe (keep the pilot alive)
         g_safe: float = 8.0,        # comfortable sustained acceleration (G); excess is penalized
+        # OPTIONAL global soft speed cap (default OFF). This is a designer-imposed absolute-speed
+        # preference -- we'd be picking the "right" speed for the ship. We prefer the speed limit to
+        # be SELF-LEARNED: the agent should discover the right speed from consequences (crashing at
+        # high speed, and the w_closing penalty which taxes closing FAST on a rock but leaves open-
+        # space cruising free). So this is kept only as an ablation knob; set w_overspeed > 0 to try
+        # a global cap. It is never a hard clamp on qvel either way.
+        v_soft: float = 60.0,       # comfortable cruise speed (m/s); penalty starts above this (if on)
+        w_overspeed: float = 0.0,   # OFF by default. >0 enables a global soft speed cap (per m/s over)
         ctrl_cost: float = 0.001,
         time_cost: float = 0.03,    # per-step cost -> rewards finishing fast
         collision_penalty: float = 600.0,   # lowered: 1200 made the ship FEAR forward motion -> retreat/stall
@@ -129,6 +145,8 @@ class AsteroidBeltEnv(gym.Env):
         self.arrival_speed_random = arrival_speed_random
         self._obs_arrival = arrival_speed_random is not None  # tier 3 appends the target to the obs
         self._arrival_target = arrival_speed                  # (re)sampled each reset
+        self.n_blockers = int(n_blockers)
+        self.blocker_jitter = float(blocker_jitter)
         self.randomize_belt = randomize_belt
         self.render_mode = render_mode
 
@@ -142,6 +160,8 @@ class AsteroidBeltEnv(gym.Env):
         self.w_spin = w_spin
         self.w_gload = w_gload
         self.g_safe = g_safe
+        self.v_soft = v_soft
+        self.w_overspeed = w_overspeed
         self.ctrl_cost = ctrl_cost
         self.time_cost = time_cost
         self.collision_penalty = collision_penalty
@@ -447,6 +467,8 @@ class AsteroidBeltEnv(gym.Env):
         if self.goal_marker_id >= 0:                       # move the visible goal-zone marker
             self.model.geom_pos[self.goal_marker_id] = self.goal
             self.model.geom_size[self.goal_marker_id, 0] = self.goal_radius
+        # force guaranteed obstacles onto the path (single-obstacle curriculum), after the goal is set
+        self._place_blockers(self.np_random)
         mujoco.mj_forward(self.model, self.data)
         self._steps = 0
         self._prev_goal_dist = self._goal_dist()
@@ -469,6 +491,42 @@ class AsteroidBeltEnv(gym.Env):
         """Curriculum hook: set how far the ship must fly (goal X). Asteroids stay where they were
         built (full belt); only the goal distance ramps -- short traverse first, then longer."""
         self.goal_x = float(x_far) + self.goal_clearance
+
+    def set_n_blockers(self, n):
+        """Curriculum hook: number of asteroids forced onto the path; next reset() picks it up."""
+        self.n_blockers = int(max(0, n))
+
+    def set_blocker_jitter(self, j):
+        """Curriculum hook: lateral spread (m) of the path blockers (large->small = easy->hard)."""
+        self.blocker_jitter = float(max(0.0, j))
+
+    def _place_blockers(self, rng):
+        """Relocate the first n_blockers active asteroids onto the start->goal path, evenly spread,
+        each offset up to blocker_jitter perpendicular to the path. Guarantees an in-the-way obstacle
+        so the agent must learn to weave. Call AFTER the goal is sampled (path depends on it)."""
+        nb = min(self.n_blockers, self.n_active)
+        if nb <= 0:
+            return
+        a = np.zeros(3)                      # ship start (origin)
+        ab = self.goal - a
+        L = float(np.linalg.norm(ab))
+        if L < 1e-6:
+            return
+        abh = ab / L
+        # two unit vectors spanning the plane perpendicular to the path (for lateral jitter)
+        ref = np.array([0.0, 1.0, 0.0]) if abs(abh[1]) < 0.9 else np.array([0.0, 0.0, 1.0])
+        u = np.cross(abh, ref); u /= (np.linalg.norm(u) + 1e-9)
+        v = np.cross(abh, u)
+        for i in range(nb):
+            t = (i + 1) / (nb + 1)           # evenly spread along the path, never at the very ends
+            base = a + t * ab
+            if self.blocker_jitter > 0.0:
+                ang = rng.uniform(0.0, 2.0 * np.pi)
+                rad = self.blocker_jitter * np.sqrt(rng.uniform(0.0, 1.0))
+                base = base + rad * (np.cos(ang) * u + np.sin(ang) * v)
+            qa, da = self.ast_qpos_adr[i], self.ast_dof_adr[i]
+            self.data.qpos[qa:qa + 3] = base
+            self.data.qvel[da:da + 6] = 0.0  # blockers sit still -> a clean weaving lesson
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
@@ -534,6 +592,11 @@ class AsteroidBeltEnv(gym.Env):
         g_load = float(np.linalg.norm(a_lin)) / 9.80665
         if g_load > self.g_safe:
             reward -= self.w_gload * (g_load - self.g_safe)
+        # soft speed ceiling: above v_soft, faster costs more -> the agent LEARNS to ease off (we
+        # never clamp qvel). High speed + no avoidance = the ram failure, so this taxes barrelling in.
+        speed = float(np.linalg.norm(v_world))
+        if speed > self.v_soft:
+            reward -= self.w_overspeed * (speed - self.v_soft)
         reward -= self.ctrl_cost * float(np.sum(action ** 2))
         reward -= self.time_cost
         # arrival brake: once close to the goal, penalize speed so the ship slows to a stop INSIDE

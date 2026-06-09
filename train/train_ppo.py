@@ -32,12 +32,11 @@ from envs.asteroid_belt_env import AsteroidBeltEnv
 from envs.belt_generator import BeltConfig, warm_belt_cache
 
 
-def make_env_fn(n_asteroids, belt_far, max_steps, seed, dynamics, goal_mode, arrival_speed):
+def make_env_fn(n_asteroids, belt_far, max_steps, seed, dynamics, env_kwargs):
     def _init():
         cfg = BeltConfig(n_asteroids=n_asteroids, belt_x_range=(100.0, belt_far), seed=seed)
         return AsteroidBeltEnv(cfg=cfg, dynamics=dynamics, max_steps=max_steps,
-                               goal_mode=goal_mode, arrival_speed=arrival_speed,
-                               randomize_belt=True)
+                               randomize_belt=True, **env_kwargs)
     return _init
 
 
@@ -77,12 +76,15 @@ def main():
         steps; exit_r rides the same steps (fine-grained enough since n spans ~100 levels)."""
 
         def __init__(self, total_timesteps, n_start, n_end, er_start, er_end,
-                     tx_start, tx_end, ramp_frac=0.6, verbose=0):
+                     tx_start, tx_end, nb_start=0, nb_end=0, bj_start=0.0, bj_end=0.0,
+                     ramp_frac=0.6, verbose=0):
             super().__init__(verbose)
             self.total = total_timesteps
             self.n_start, self.n_end = n_start, n_end
             self.er_start, self.er_end = er_start, er_end
             self.tx_start, self.tx_end = tx_start, tx_end
+            self.nb_start, self.nb_end = nb_start, nb_end        # path blockers count (1->K)
+            self.bj_start, self.bj_end = bj_start, bj_end        # blocker lateral jitter (large->small)
             self.ramp_frac = ramp_frac
             self._cur = None
 
@@ -92,14 +94,20 @@ def main():
             er_min = self.er_start[0] + frac * (self.er_end[0] - self.er_start[0])
             er_max = self.er_start[1] + frac * (self.er_end[1] - self.er_start[1])
             tx = self.tx_start + frac * (self.tx_end - self.tx_start)
-            if n != self._cur:
+            nb = int(round(self.nb_start + frac * (self.nb_end - self.nb_start)))
+            bj = self.bj_start + frac * (self.bj_end - self.bj_start)
+            # fire when either discrete knob (density n or blocker count nb) steps; the continuous
+            # values (exit_r, traverse, blocker jitter) ride those same updates.
+            if (n, nb) != self._cur:
                 self.training_env.env_method("set_n_asteroids", n)
                 self.training_env.env_method("set_exit_r", er_min, er_max)
                 self.training_env.env_method("set_traverse", tx)
-                self._cur = n
+                self.training_env.env_method("set_n_blockers", nb)
+                self.training_env.env_method("set_blocker_jitter", bj)
+                self._cur = (n, nb)
                 if self.verbose:
                     print(f"[curriculum] n={n} exit_r=({er_min:.0f},{er_max:.0f}) traverse={tx:.0f} "
-                          f"at {self.num_timesteps} steps")
+                          f"blockers={nb} jitter={bj:.0f} at {self.num_timesteps} steps")
             return True
 
     p = argparse.ArgumentParser()
@@ -129,6 +137,19 @@ def main():
     p.add_argument("--arrival-speed", type=float, default=None,
                    help="interior_point only: require speed <= this on arrival (tier 2). "
                         "Omit for tier 1 (reaching the sphere is enough).")
+    p.add_argument("--v-soft", type=float, default=60.0,
+                   help="soft speed cap (m/s) IF --w-overspeed > 0 (optional ablation; never a clamp)")
+    p.add_argument("--w-overspeed", type=float, default=0.0,
+                   help="OFF by default. >0 enables an optional global soft speed cap (per m/s over "
+                        "--v-soft). We prefer speed to be self-learned via w_closing + crash consequences.")
+    p.add_argument("--n-blockers", type=int, default=0,
+                   help="single-obstacle weaving curriculum: target # of asteroids forced onto the "
+                        "path. 0 = off. Ramps from --n-blockers-start over the curriculum.")
+    p.add_argument("--n-blockers-start", type=int, default=1, help="curriculum starting blocker count")
+    p.add_argument("--blocker-jitter", type=float, default=0.0,
+                   help="target blocker lateral spread (m); 0 = dead-centre (hardest)")
+    p.add_argument("--blocker-jitter-start", type=float, default=40.0,
+                   help="starting blocker lateral spread (m); large = off to one side (easy)")
     p.add_argument("--max-steps", type=int, default=None,
                    help="episode step budget. Default: generous, auto-scaled with --belt-len so the "
                         "budget never bottlenecks (only severe overruns truncate).")
@@ -153,6 +174,16 @@ def main():
     max_steps = args.max_steps if args.max_steps else max(2200, int(round(2200 * belt_far / 700.0)))
     print(f"[train] belt_far={belt_far:.0f} m  max_steps={max_steps}  goal_mode={args.goal_mode}", flush=True)
 
+    # shared env construction kwargs (curriculum starts at these; the callback ramps the training
+    # env each step). Blockers start at their --*-start values when the feature is enabled.
+    blockers_on = args.n_blockers > 0
+    env_kwargs = dict(
+        goal_mode=args.goal_mode, arrival_speed=args.arrival_speed,
+        v_soft=args.v_soft, w_overspeed=args.w_overspeed,
+        n_blockers=(args.n_blockers_start if blockers_on else 0),
+        blocker_jitter=(args.blocker_jitter_start if blockers_on else 0.0),
+    )
+
     # Warm the belt-layout cache in THIS (single) process before spawning SubprocVecEnv
     # workers. At high density the per-worker rejection sampling tripped a numpy memory-
     # corruption flake when 16 workers ran it concurrently; precomputing once means workers
@@ -163,8 +194,7 @@ def main():
     warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, belt_x_range=_bx, seed=args.seed + 1000))
 
     env = make_vec_env(
-        make_env_fn(args.n_asteroids, belt_far, max_steps, args.seed, args.dynamics,
-                    args.goal_mode, args.arrival_speed),
+        make_env_fn(args.n_asteroids, belt_far, max_steps, args.seed, args.dynamics, env_kwargs),
         n_envs=args.n_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
@@ -180,8 +210,7 @@ def main():
         env = VecNormalize(env, norm_obs=False, norm_reward=True, gamma=0.995)  # reward-scale norm
 
     eval_env = make_vec_env(
-        make_env_fn(args.n_asteroids, belt_far, max_steps, args.seed + 1000, args.dynamics,
-                    args.goal_mode, args.arrival_speed),
+        make_env_fn(args.n_asteroids, belt_far, max_steps, args.seed + 1000, args.dynamics, env_kwargs),
         n_envs=1,
         seed=args.seed + 1000,
     )
@@ -255,6 +284,10 @@ def main():
             CurriculumCallback(args.timesteps, args.n_start, args.n_asteroids,
                                er_start=(0.0, 0.0), er_end=tuple(args.exit_r_end),
                                tx_start=tx_s, tx_end=tx_e,
+                               nb_start=(args.n_blockers_start if blockers_on else 0),
+                               nb_end=(args.n_blockers if blockers_on else 0),
+                               bj_start=(args.blocker_jitter_start if blockers_on else 0.0),
+                               bj_end=(args.blocker_jitter if blockers_on else 0.0),
                                ramp_frac=args.ramp_frac, verbose=1)
         )
 
