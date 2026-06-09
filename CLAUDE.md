@@ -14,15 +14,16 @@ MuJoCo 3.3.7, Gymnasium 0.29.1, Stable-Baselines3 2.3.0, PyTorch 2.2.1+cu121, py
 The README quick-start's `requirements.txt` (numpy 2.x) is the **stale** older recipe — don't
 follow it; build the env per the RL deps above.
 
-> **Crash note (important):** this conda's torch 2.2.1 intermittently crashes while importing
-> `torch._dynamo` (~15% per fresh import; surfaces as an `sre_compile` ValueError on 3.10, a
-> segfault on 3.11 — same C-level torch flake, **not** a Python-version issue, so 3.10 vs 3.11
-> makes no difference). It only bites at import. Normal single-process use rarely triggers it;
-> what blew up was **16 SubprocVecEnv "spawn" workers each re-importing torch** (~16x the dice).
-> Fix lives in `train/train_ppo.py`: `start_method="forkserver"` (one clean import, not per-worker)
-> + torch/SB3 imports inside `main()` + `_warm_import` retry, with `Agent_tool/train_resilient.sh`
-> auto-resuming the rare startup flake. **Do not switch to spawn (constant crashes) or fork (CUDA
-> deadlock).** Manual play / small scripts don't need any of this.
+> **Crash note (important):** torch 2.2.1's `torch._dynamo` intermittently crashes while *importing*
+> (~15% per fresh import — `sre_compile` ValueError on 3.10, segfault on 3.11; a C-level torch flake,
+> not a Python-version issue). It only bites at import and is basically harmless under normal use.
+> The crash saga was **self-inflicted**: `train_ppo.py` had explicitly set SubprocVecEnv
+> `start_method="spawn"`, overriding SB3's safe default (`forkserver`). spawn re-imports torch in
+> all 16 workers → ~16x the dice → constant crashes. **Fix = just don't override it** (use the
+> default forkserver: one clean import, then fork). We also keep torch/SB3 imports inside `main()`
+> (workers stay torch-free) + a `_warm_import` retry, and `Agent_tool/train_resilient.sh` auto-resumes
+> the rare startup flake. **Never pass `start_method="spawn"` (re-import storm) or `"fork"` (CUDA
+> deadlock).** Manual play / single-env eval are single-process and never hit this.
 
 Run everything **from the repo root**:
 

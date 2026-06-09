@@ -112,11 +112,12 @@ def main():
         n_envs=args.n_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
-        # "forkserver": a clean server process (no torch/CUDA, since those live in main()) imports
-        # the env stack ONCE and forks the workers from it. Avoids both (a) "spawn" re-importing in
-        # every worker -> hammering this env's flaky sre_compile, and (b) "fork" deadlocking children
-        # of the CUDA-initialised main process. Workers stay torch/CUDA-free.
-        vec_env_kwargs=dict(start_method="forkserver"),
+        # NOTE: deliberately NOT passing start_method -> use SB3's safe default ("forkserver" on
+        # Linux): a clean server process imports the env stack ONCE and forks workers from it.
+        # Earlier this was overridden to "spawn", which re-imports torch in all 16 workers and
+        # constantly tripped torch 2.2.1's flaky `_dynamo` import -> the whole crash saga. Do NOT
+        # override this (spawn = re-import storm; fork = CUDA-init deadlock). Keeping torch/SB3
+        # imports inside main() also keeps the forked workers torch/CUDA-free.
     )
     env = VecMonitor(env, filename=os.path.join(run_dir, "monitor"))
 
