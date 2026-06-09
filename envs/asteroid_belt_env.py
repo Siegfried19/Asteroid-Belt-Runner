@@ -62,6 +62,22 @@ class AsteroidBeltEnv(gym.Env):
         exit_r_min: float = 90.0,   # exit is sampled this far .. exit_r_max off the X axis (m)
         exit_r_max: float = 150.0,  #   (out toward the belt's 180 m rim -> forces real weaving)
         goal_radius: float = 60.0,  # DIAG(temp): big sphere -- verify PPO can learn to reach at all
+        # --- goal mode --------------------------------------------------------------------------
+        # "traverse"       : the goal is an (off-axis) exit point PAST the far plane -> fly through.
+        # "interior_point" : the goal is a random, clearance-checked point INSIDE the belt -> fly in
+        #                    to a specific spot and (optionally) stop there. obs/reward are unchanged
+        #                    (the obs already carries body-frame goal dir/dist; reward is potential-
+        #                    based to an arbitrary goal), so a traverse-trained net warm-starts here.
+        goal_mode: str = "traverse",
+        interior_min_depth: float = 200.0,  # interior goal X must be >= this far past the belt's near
+                                            #   edge -> forces real penetration, no entrance-hugging goals
+        interior_rho_frac: float = 0.7,     # interior goal lateral offset up to this fraction of belt rim
+        interior_clearance: float = 30.0,   # min surface clearance (m) of the goal from every asteroid
+        # arrival-speed tiers (interior_point): None -> reaching the sphere is success (tier 1). A float
+        # -> must ALSO be slower than this at arrival (tier 2). A (lo, hi) via arrival_speed_random ->
+        # per-episode random target, appended to the obs so the agent can comply (tier 3).
+        arrival_speed: float = None,
+        arrival_speed_random: tuple = None,
         randomize_belt: bool = True,
         render_mode: str = None,
         # reward weights
@@ -105,6 +121,14 @@ class AsteroidBeltEnv(gym.Env):
         self.exit_r_min = exit_r_min
         self.exit_r_max = exit_r_max
         self.goal_radius = goal_radius
+        self.goal_mode = goal_mode
+        self.interior_min_depth = float(interior_min_depth)
+        self.interior_rho_frac = float(interior_rho_frac)
+        self.interior_clearance = float(interior_clearance)
+        self.arrival_speed = arrival_speed
+        self.arrival_speed_random = arrival_speed_random
+        self._obs_arrival = arrival_speed_random is not None  # tier 3 appends the target to the obs
+        self._arrival_target = arrival_speed                  # (re)sampled each reset
         self.randomize_belt = randomize_belt
         self.render_mode = render_mode
 
@@ -128,6 +152,10 @@ class AsteroidBeltEnv(gym.Env):
         self.w_retreat = w_retreat
 
         self.goal_x = self.base_cfg.belt_x_range[1] + goal_clearance
+        # fixed far plane for the OOB bound. In traverse mode the OOB far-bound rides goal_x (the
+        # traverse curriculum tightens it as a "don't overshoot" signal); in interior mode the goal
+        # sits inside the belt, so the OOB far-bound stays pinned here at the actual belt exit.
+        self.belt_far_x = self.goal_x
         self.goal = np.array([self.goal_x, 0.0, 0.0])   # (re)sampled each reset
 
         self._build(self.base_cfg)
@@ -136,7 +164,8 @@ class AsteroidBeltEnv(gym.Env):
         # action: normalized vector -> the controlled actuators' ctrlrange
         self.action_space = spaces.Box(-1.0, 1.0, shape=(len(self.act_ids),), dtype=np.float32)
         # obs = ego(16) + radar(2 channels x n_bins): proximity + closing velocity
-        obs_dim = 3 + 3 + 3 + 3 + 4 + 2 * self.n_bins
+        # (+1 for the per-episode arrival-speed target in interior tier-3 mode)
+        obs_dim = 3 + 3 + 3 + 3 + 4 + 2 * self.n_bins + (1 if self._obs_arrival else 0)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self._viewer = None
@@ -233,6 +262,40 @@ class AsteroidBeltEnv(gym.Env):
             return np.zeros((0, 3))
         return np.stack([self.data.qvel[d:d + 3] for d in self.ast_dof_adr[:n]])
 
+    def _active_centers(self):
+        """World positions + r_eff of the active asteroids, read straight from qpos. Valid even
+        before mj_forward (each rock's free-joint qpos IS its body/geom position), so the interior
+        goal sampler can clearance-check right after _place_asteroids writes the layout."""
+        n = self.n_active
+        if n == 0:
+            return np.zeros((0, 3)), np.zeros(0)
+        centers = np.stack([self.data.qpos[a:a + 3] for a in self.ast_qpos_adr[:n]])
+        return centers, self.ast_r[:n]
+
+    def _sample_interior_goal(self, rng):
+        """A random point INSIDE the belt for goal_mode='interior_point': X at least
+        `interior_min_depth` past the near edge (forces real penetration, no entrance-hugging),
+        YZ uniform over a disc of `interior_rho_frac` of the belt rim, and surface-clear of every
+        active asteroid by `interior_clearance` (the target never sits buried in a rock)."""
+        cfg = self.base_cfg
+        x_lo = cfg.belt_x_range[0] + self.interior_min_depth
+        x_hi = cfg.belt_x_range[1]
+        if x_lo >= x_hi:                       # min_depth too large for this belt -> clamp
+            x_lo = max(cfg.belt_x_range[0], x_hi - 1.0)
+        rho_cap = self.interior_rho_frac * cfg.belt_yz_radius
+        centers, r = self._active_centers()
+        g = None
+        for _ in range(200):
+            gx = rng.uniform(x_lo, x_hi)
+            th = rng.uniform(0.0, 2.0 * np.pi)
+            rho = rho_cap * np.sqrt(rng.uniform(0.0, 1.0))   # sqrt -> uniform over the disc area
+            g = np.array([gx, rho * np.cos(th), rho * np.sin(th)])
+            if len(centers) == 0:
+                return g
+            if float((np.linalg.norm(centers - g, axis=1) - r).min()) >= self.interior_clearance:
+                return g
+        return g   # rare: no clear point in 200 tries -> use the last candidate
+
     def _nearest_surface_dist(self):
         ast, r = self._active_slice()
         if len(ast) == 0:
@@ -325,11 +388,10 @@ class AsteroidBeltEnv(gym.Env):
         # full-sphere body-frame radar (proximity + closing velocity per direction bin)
         prox, clos = self._radar(R, pos, v_world)
 
-        obs = np.concatenate([
-            v_body, w_local, fwd, up,
-            goal_dir, [goal_dist],
-            prox, clos,
-        ]).astype(np.float32)
+        parts = [v_body, w_local, fwd, up, goal_dir, [goal_dist], prox, clos]
+        if self._obs_arrival:   # tier 3: let the agent see the per-episode arrival-speed target
+            parts.append([(self._arrival_target or 0.0) / 100.0])
+        obs = np.concatenate(parts).astype(np.float32)
         return obs
 
     # ------------------------------------------------------------------ gym API
@@ -365,15 +427,26 @@ class AsteroidBeltEnv(gym.Env):
         # ship starts at origin, identity orientation, at rest
         self.data.qpos[self.qpos_adr:self.qpos_adr + 7] = [0, 0, 0, 1, 0, 0, 0]
         self.data.qvel[self.qvel_adr:self.qvel_adr + 6] = 0.0
-        # random exit point: off-axis (gy, gz) so the ship must weave to it, not fly straight
-        th = self.np_random.uniform(0.0, 2.0 * np.pi)
-        rho = self.np_random.uniform(self.exit_r_min, self.exit_r_max)
-        self.goal = np.array([self.goal_x, rho * np.cos(th), rho * np.sin(th)])
-        if self.goal_marker_id >= 0:                       # move the visible exit-zone marker
+        # scatter the asteroids for this episode FIRST: interior goals are clearance-checked
+        # against them; traverse goals don't read them, so the order is harmless there.
+        self._place_asteroids(self.np_random)
+        # pick this episode's goal
+        if self.goal_mode == "interior_point":
+            self.goal = self._sample_interior_goal(self.np_random)
+        else:
+            # traverse: a random off-axis exit point past the far plane -> weave, don't fly straight
+            th = self.np_random.uniform(0.0, 2.0 * np.pi)
+            rho = self.np_random.uniform(self.exit_r_min, self.exit_r_max)
+            self.goal = np.array([self.goal_x, rho * np.cos(th), rho * np.sin(th)])
+        # arrival-speed target (interior tiers 2/3): None -> reaching the sphere alone is success
+        if self.arrival_speed_random is not None:
+            lo, hi = self.arrival_speed_random
+            self._arrival_target = float(self.np_random.uniform(lo, hi))
+        else:
+            self._arrival_target = self.arrival_speed
+        if self.goal_marker_id >= 0:                       # move the visible goal-zone marker
             self.model.geom_pos[self.goal_marker_id] = self.goal
             self.model.geom_size[self.goal_marker_id, 0] = self.goal_radius
-        # scatter the asteroids for this episode
-        self._place_asteroids(self.np_random)
         mujoco.mj_forward(self.model, self.data)
         self._steps = 0
         self._prev_goal_dist = self._goal_dist()
@@ -478,18 +551,26 @@ class AsteroidBeltEnv(gym.Env):
         info = {}
 
         rho_yz = np.linalg.norm(pos[1:3])
+        # traverse: the far-bound rides goal_x (a tight "don't overshoot" brake signal that the
+        # curriculum tightens); interior: the goal is inside, so the far-bound stays at the belt exit.
+        far_bound = self.goal_x if self.goal_mode != "interior_point" else self.belt_far_x
         oob = (
             x < -50.0
             or rho_yz > self.base_cfg.belt_yz_radius + self.oob_yz_margin
-            or x > self.goal_x + 30.0   # tight far-bound doubles as a "don't overshoot" brake signal
+            or x > far_bound + 30.0
         )
 
         if collided:
             reward -= self.collision_penalty
             terminated = True
             info["outcome"] = "collision"
-        elif np.linalg.norm(pos - self.goal) < self.goal_radius:
-            # reached the (random, off-axis) exit point -- not just any spot on the goal plane
+        elif np.linalg.norm(pos - self.goal) < self.goal_radius and (
+            self._arrival_target is None
+            or float(np.linalg.norm(v_world)) <= self._arrival_target
+        ):
+            # reached the goal point (traverse: the random off-axis exit; interior: the in-belt
+            # target). Tiers 2/3 additionally require the ship to be slow enough on arrival; if it's
+            # in the sphere but too fast, this is False -> the episode continues so it can brake.
             reward += self.success_bonus
             terminated = True
             info["outcome"] = "success"

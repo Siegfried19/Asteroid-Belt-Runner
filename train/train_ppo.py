@@ -32,10 +32,12 @@ from envs.asteroid_belt_env import AsteroidBeltEnv
 from envs.belt_generator import BeltConfig, warm_belt_cache
 
 
-def make_env_fn(n_asteroids, max_steps, seed, dynamics):
+def make_env_fn(n_asteroids, belt_far, max_steps, seed, dynamics, goal_mode, arrival_speed):
     def _init():
-        cfg = BeltConfig(n_asteroids=n_asteroids, seed=seed)
-        return AsteroidBeltEnv(cfg=cfg, dynamics=dynamics, max_steps=max_steps, randomize_belt=True)
+        cfg = BeltConfig(n_asteroids=n_asteroids, belt_x_range=(100.0, belt_far), seed=seed)
+        return AsteroidBeltEnv(cfg=cfg, dynamics=dynamics, max_steps=max_steps,
+                               goal_mode=goal_mode, arrival_speed=arrival_speed,
+                               randomize_belt=True)
     return _init
 
 
@@ -118,28 +120,51 @@ def main():
     p.add_argument("--traverse", type=float, nargs=2, default=None, metavar=("START", "END"),
                    help="curriculum ramp of goal distance, e.g. 300 700 (default: no ramp, full traverse)")
     p.add_argument("--vecnorm", action="store_true", help="wrap envs in VecNormalize (reward-scale norm)")
-    p.add_argument("--max-steps", type=int, default=2200)
+    p.add_argument("--belt-len", type=float, default=None,
+                   help="far edge of the belt (m); longer belt = longer traverse. Default uses "
+                        "BeltConfig's 700. Scale --n-asteroids yourself to hold density.")
+    p.add_argument("--goal-mode", choices=["traverse", "interior_point"], default="traverse",
+                   help="traverse: fly through to an off-axis exit; interior_point: fly to a random "
+                        "clearance-checked point INSIDE the belt")
+    p.add_argument("--arrival-speed", type=float, default=None,
+                   help="interior_point only: require speed <= this on arrival (tier 2). "
+                        "Omit for tier 1 (reaching the sphere is enough).")
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="episode step budget. Default: generous, auto-scaled with --belt-len so the "
+                        "budget never bottlenecks (only severe overruns truncate).")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--run-name", type=str, default="ppo_simplified")
     p.add_argument("--logdir", type=str, default="logs")
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--resume", action="store_true",
                    help="continue from the latest checkpoint in the run dir (for crash recovery)")
+    p.add_argument("--init-from", type=str, default=None,
+                   help="warm-start a NEW run's policy weights from an existing model.zip (e.g. "
+                        "models/ppo_traverse_n40_63pct.zip) and train it on this (harder) config. "
+                        "Net arch comes from the donor; --net-width is ignored. Ignored if --resume "
+                        "finds a checkpoint (crash recovery takes priority).")
     args = p.parse_args()
 
     run_dir = os.path.join(args.logdir, args.run_name)
     os.makedirs(run_dir, exist_ok=True)
+
+    # belt length + a generous, auto-scaled step budget (so steps never bottleneck a long traverse)
+    belt_far = args.belt_len if args.belt_len else BeltConfig().belt_x_range[1]
+    max_steps = args.max_steps if args.max_steps else max(2200, int(round(2200 * belt_far / 700.0)))
+    print(f"[train] belt_far={belt_far:.0f} m  max_steps={max_steps}  goal_mode={args.goal_mode}", flush=True)
 
     # Warm the belt-layout cache in THIS (single) process before spawning SubprocVecEnv
     # workers. At high density the per-worker rejection sampling tripped a numpy memory-
     # corruption flake when 16 workers ran it concurrently; precomputing once means workers
     # just load the layout. Warm both the train (seed) and eval (seed+1000) belts.
     print(f"[train] warming belt cache (n={args.n_asteroids}) ...", flush=True)
-    warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed))
-    warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed + 1000))
+    _bx = (100.0, belt_far)
+    warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, belt_x_range=_bx, seed=args.seed))
+    warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, belt_x_range=_bx, seed=args.seed + 1000))
 
     env = make_vec_env(
-        make_env_fn(args.n_asteroids, args.max_steps, args.seed, args.dynamics),
+        make_env_fn(args.n_asteroids, belt_far, max_steps, args.seed, args.dynamics,
+                    args.goal_mode, args.arrival_speed),
         n_envs=args.n_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
@@ -155,7 +180,8 @@ def main():
         env = VecNormalize(env, norm_obs=False, norm_reward=True, gamma=0.995)  # reward-scale norm
 
     eval_env = make_vec_env(
-        make_env_fn(args.n_asteroids, args.max_steps, args.seed + 1000, args.dynamics),
+        make_env_fn(args.n_asteroids, belt_far, max_steps, args.seed + 1000, args.dynamics,
+                    args.goal_mode, args.arrival_speed),
         n_envs=1,
         seed=args.seed + 1000,
     )
@@ -177,6 +203,14 @@ def main():
     if latest_ckpt:
         print(f"[train] resuming from {latest_ckpt} (~{done_steps} steps done)")
         model = PPO.load(latest_ckpt, env=env, device="auto", tensorboard_log=run_dir)
+    elif args.init_from:
+        # Warm-start: reuse a trained policy's weights as the seed for a fresh run on a (usually
+        # harder) config. The donor's net_arch is restored by load(); we override the exploration/
+        # entropy hyperparams from THIS run's CLI (the donor may have used a different ent_coef),
+        # and timesteps are reset below so this counts as a brand-new run.
+        print(f"[train] warm-starting policy from {args.init_from}")
+        model = PPO.load(args.init_from, env=env, device="auto", tensorboard_log=run_dir)
+        model.ent_coef = args.ent_coef
     else:
         model = PPO(
             "MlpPolicy",
@@ -215,7 +249,7 @@ def main():
         ),
     ]
     if args.curriculum:
-        tx_far = BeltConfig().belt_x_range[1]
+        tx_far = belt_far
         tx_s, tx_e = tuple(args.traverse) if args.traverse else (tx_far, tx_far)
         callbacks.append(
             CurriculumCallback(args.timesteps, args.n_start, args.n_asteroids,

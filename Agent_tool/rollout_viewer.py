@@ -32,10 +32,17 @@ def main():
     p.add_argument("--exit-r", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                    help="override exit off-axis range to match the model's training "
                         "(e.g. --exit-r 0 0 for a straight traverse)")
+    p.add_argument("--belt-len", type=float, default=None, help="far edge of the belt (m); match training")
+    p.add_argument("--goal-mode", choices=["traverse", "interior_point"], default="traverse",
+                   help="match the mode the model was trained on")
+    p.add_argument("--arrival-speed", type=float, default=None,
+                   help="interior_point: require speed <= this on arrival (match training tier)")
     args = p.parse_args()
 
-    cfg = BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed)
-    env = AsteroidBeltEnv(cfg=cfg, randomize_belt=False)
+    belt_far = args.belt_len if args.belt_len else BeltConfig().belt_x_range[1]
+    cfg = BeltConfig(n_asteroids=args.n_asteroids, belt_x_range=(100.0, belt_far), seed=args.seed)
+    env = AsteroidBeltEnv(cfg=cfg, randomize_belt=False,
+                          goal_mode=args.goal_mode, arrival_speed=args.arrival_speed)
     if args.exit_r is not None:
         env.set_exit_r(args.exit_r[0], args.exit_r[1])
     model = PPO.load(args.model, device="cpu")

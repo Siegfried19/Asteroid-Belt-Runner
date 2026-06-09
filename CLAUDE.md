@@ -95,7 +95,14 @@ Because the live path sets `qvel` directly, the six XML actuators are not curren
   to keep the pilot alive) + ctrl/time, success/collision/OOB terminals. `reset()` re-scatters rocks
   via qpos/qvel (build-once); curriculum density via `n_active` (extra rocks parked far out of bounds).
   The stored MjSpec is `self.mj_spec` (NOT `self.spec`, which Gymnasium reserves for `EnvSpec`).
+  A `goal_mode` switch picks the task: `"traverse"` (default — off-axis exit past the far plane) or
+  `"interior_point"` (a random, min-depth + clearance-checked target INSIDE the belt; arrival tiers via
+  `arrival_speed` / `arrival_speed_random` — the latter appends the target speed to obs -> 161). Both
+  share the same obs/action, so a traverse-trained net warm-starts onto either.
 - **`train/train_ppo.py`** — SB3 PPO over `SubprocVecEnv`, checkpoints/best-model/tensorboard to `logs/`.
+  `--init-from <model.zip>` warm-starts a new run from a trained policy (net_arch follows the donor;
+  only works while obs/action stay fixed — i.e. not the 6->17 realistic switch). `--belt-len` lengthens
+  the belt (step budget auto-scales); `--goal-mode`/`--arrival-speed` select the interior-point task.
 - **`envs/thruster_layout.py`** — the 17 realistic thrusters (Roadmap #3), built; training on them is R10.
 
 ### Conventions

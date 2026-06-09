@@ -380,3 +380,34 @@ numpy corruption)、.gitignore(.belt_cache/)、rollout_viewer(+--exit-r)、日�
 - **flame_viewer 机动表**同步对称版,新增纯 roll/pitch/yaw 旋转机动。
 - 渲染命令:`DISPLAY=:1 conda run -n asteroid-belt-runner python Agent_tool/thruster_layout_viewer.py`;
   可控性自检:`conda run -n asteroid-belt-runner python envs/thruster_layout.py`。
+
+## 2026-06-09 — 热启动复用 63% 模型起训 n80 + 落地两个新任务方向（加长带子/带内随机点）
+
+会话目标：用户拍板"既然 63% 模型可复用，就热启动续练并监控；同时把之前说的新方向写好；确认 17 推进器是否已写"。
+- **澄清"网络深度"问题**：当初突破是 **net 加宽**（256²→512²，仍 2 层），不是加深。"加层/更深"只是当时列的
+  *候选杠杆*、从未触发（加宽就破局了），**不是遗留 bug**。目前瓶颈是冲撞局部最优/避障，不是容量，无需动深度。
+  PROJECT_PLAN 记为"开放保险栏"（若再撞容量墙，给 train_ppo 加 `--net-depth`）。
+- **17 推进器现状**：`thruster_layout.py`+`build_scene(realistic)`+env `dynamics` 开关+火焰可视化+对称 RCS
+  **全部已建模&验证（wrench rank=6）**，唯独"在 17 维动作空间上训练"从未做（Phase 6/R10 仍开放）。
+- **`train_ppo.py` 加 `--init-from <model.zip>` 热启动**：`PPO.load` donor 权重做新 run 种子（net_arch 随 donor=512，
+  `--net-width` 忽略），ent_coef 取本 run CLI，timesteps 重置。`--resume`（崩溃恢复）优先于 `--init-from`，逻辑正确。
+  仅 obs(160)+action(6) 不变时可复用（traverse/加长带/带内点 都满足；真实 17 推进器 6→17 不行，只能迁底层特征）。
+- **起后台训练（子 agent 监控）**：`train_resilient.sh ppo_warmstart_n80_0609 4000000 80 --curriculum --n-start 40
+  --net-width 512 --ent-coef 0.05 --exit-r-end 0 0 --init-from models/ppo_traverse_n40_63pct.zip`。
+  warm-start 确认（512² checkpoint 8.38MB）；eval reward -1350→-458(350k)→curriculum 加密度后回落 ~-4000（n40→n80
+  密度爬升期短 episode，预期低谷）；后半程满 n80 看能否突破。**训完子 agent 会测 final model.zip + best 两个、报 n80 成败分布。**
+- **新方向①加长陨石带（实现完成）**：`--belt-len FAR` → `belt_x_range=(100,FAR)`；`--max-steps` 默认按带长自动放宽
+  `max(2200, 2200×FAR/700)`（只严重超时才截断，不让步数误判）；密度 `--n-asteroids` 自己按比例加。
+- **新方向②带内随机点（实现完成）**：env 加 `goal_mode`（默认 traverse 不变 / 新 `interior_point`）。
+  `interior_point`：reset 先放石头→采 X 带内随机（`interior_min_depth=200` 保证最小深度不贴入口）、YZ 盘内随机
+  （`interior_rho_frac=0.7`）、对所有 active 石头 `interior_clearance=30` 检查（不落石头里，200 次拒绝采样）。
+  OOB 远界按模式分（traverse 跟 goal_x 防过冲 / interior 钉在 `belt_far_x` 带子出口）。
+  到达分档：①进球即成功 → ②`arrival_speed=阈值`（进球且速度≤阈值，obs 不变）→ ③`arrival_speed_random=(lo,hi)`
+  每集随机目标速度（**追加进 obs → 161**，让 agent 能遵守；故 tier3 与 160 维模型不兼容，属更难变体）。
+- **工具链同步**：`eval_policy.py`/`rollout_viewer.py` 加 `--goal-mode/--belt-len/--arrival-speed`（默认全等于旧行为）；
+  `--max-steps` 默认改自动放宽。**全部加法式改动**：默认路径 obs 仍 160、traverse 行为逐字节不变 → 不影响正在跑的训练/历史模型。
+- **验证**：check_env 式 smoke（traverse obs160 / interior tier1-3 obs160-161 / 加长带 1100m 深度778.7≥200 / clearance35.6≥30）
+  全过；4 文件 py_compile 全过。临时测试文件已删（未留根目录垃圾）。
+- **未 commit**：train_ppo（--init-from/--belt-len/--goal-mode/--arrival-speed/auto max_steps）、asteroid_belt_env
+  （goal_mode + 内部点采样 + 到达档位 + belt_far_x）、eval_policy/rollout_viewer（透传）、CLAUDE.md/PROJECT_PLAN/本 log。
+  训练产物 `logs/ppo_warmstart_n80_0609`（git-ignored）。**等 n80 训练结果出来再决定 commit/留模型。**

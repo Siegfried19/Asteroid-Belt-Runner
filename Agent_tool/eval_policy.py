@@ -22,15 +22,24 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--dynamics", choices=["simplified", "realistic"], default="simplified")
     p.add_argument("--n-asteroids", type=int, default=135)
-    p.add_argument("--max-steps", type=int, default=2200)
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="episode step budget (default: generous, auto-scaled with --belt-len)")
+    p.add_argument("--belt-len", type=float, default=None, help="far edge of the belt (m); match training")
+    p.add_argument("--goal-mode", choices=["traverse", "interior_point"], default="traverse",
+                   help="match the mode the model was trained on")
+    p.add_argument("--arrival-speed", type=float, default=None,
+                   help="interior_point: require speed <= this on arrival (match training tier)")
     p.add_argument("--exit-r", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                    help="override exit off-axis range for eval (default: env default)")
     p.add_argument("--episodes", type=int, default=100)
     p.add_argument("--seed", type=int, default=5000)
     args = p.parse_args()
 
-    cfg = BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed)
-    env = AsteroidBeltEnv(cfg=cfg, dynamics=args.dynamics, max_steps=args.max_steps,
+    belt_far = args.belt_len if args.belt_len else BeltConfig().belt_x_range[1]
+    max_steps = args.max_steps if args.max_steps else max(2200, int(round(2200 * belt_far / 700.0)))
+    cfg = BeltConfig(n_asteroids=args.n_asteroids, belt_x_range=(100.0, belt_far), seed=args.seed)
+    env = AsteroidBeltEnv(cfg=cfg, dynamics=args.dynamics, max_steps=max_steps,
+                          goal_mode=args.goal_mode, arrival_speed=args.arrival_speed,
                           randomize_belt=True)
     if args.exit_r is not None:
         env.set_exit_r(args.exit_r[0], args.exit_r[1])

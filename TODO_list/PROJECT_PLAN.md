@@ -83,12 +83,19 @@
   `belt_generator` 布局磁盘缓存（绕高密度 numpy corruption）；`render_scene.py` 离屏出图；场景 600m×180m。
 - **下一步二选一**：①降 n40 碰撞 或 ②推 curriculum 加难（密度 40→80→135 / `goal_radius` 60→35 / off-axis 0→150）。
 
-### 新任务方向（2026-06-09 用户提出，待实现；详见 CLAUDE_LOG）
-- [ ] **加长陨石带**：`BeltConfig.belt_x_range` 拉长（如 600→1000m），`n_asteroids` 按比例加保密度，
-      **`max_steps` 放宽到远超够用**（只严重超时才截断，不让步数误判失败）。
-- [ ] **新任务「飞到陨石带内部随机点」**（新增 `goal_mode` 开关，保留 traverse）：
-      `reset()` 在 `interior_point` 模式下 X 在带内随机（**保证最小 X 深度**，不贴入口）、yz 截面内随机；
-      目标点对所有小行星做 clearance 检查。到达判定分档递进：①进球即成功 → ②进球且速度<阈值 → ③阈值可配置。
+### 新任务方向（2026-06-09 用户提出；**代码已实现，待训练**；详见 CLAUDE_LOG）
+- [x] **加长陨石带（实现）**：`train_ppo.py --belt-len FAR` 设 `belt_x_range=(100,FAR)`，`--max-steps` 默认
+      **按带长自动放宽**（`2200×FAR/700`，下限 2200，只严重超时才截断）。`--n-asteroids` 自己按比例加保密度。
+      `eval_policy/rollout_viewer` 同加 `--belt-len`。 → [ ] **待正式训练**（拉长带子重训/续训）。
+- [x] **「飞到带内随机点」(实现)**：env 新增 `goal_mode` 开关（默认 `traverse` 不变，新 `interior_point`）。
+      `interior_point`：`reset()` 先放小行星，再采 X 带内随机（`interior_min_depth` 保证最小深度不贴入口）、
+      YZ 截面盘内随机，对所有 active 小行星做 `interior_clearance` 检查（不落石头里）。到达分档：①进球即成功
+      → ②`arrival_speed=阈值`（进球且速度≤阈值）→ ③`arrival_speed_random=(lo,hi)` 每集随机目标速度（**追加进 obs**，
+      obs 161）。`train_ppo/eval_policy/rollout_viewer` 加 `--goal-mode/--arrival-speed`。 → [ ] **待正式训练**。
+- **热启动复用**：`train_ppo.py --init-from <model.zip>` 用已训模型权重做种子起新 run（net_arch 随 donor）。
+      只要 obs(160)+action(6) 不变（traverse/加长带/带内点 都满足），63% 模型可直接续练；换真实 17 推进器不行。
+- **网络深度（开放选项，未触发）**：当前 net 恒 2 层（`--net-width` 只控宽）。突破靠 256²→512² **加宽**；
+      "加层/更深"从未试过，是若再撞容量天花板时的保险栏（需给 train_ppo 加 `--net-depth`）。
 
 ### Phase 5 — 两套动力学的键盘飞控（Roadmap #4）
 - [ ] 扩展 `manual_controller.py`：在直接速度控制之外，增加力/推力模式，可切换
@@ -103,6 +110,14 @@
 ```bash
 # 训练（简化）
 conda run -n asteroid-belt-runner python train/train_ppo.py --timesteps 2000000 --run-name ppo_simplified_v2
+# 热启动续练（从 63% 模型加难，net 随 donor=512）
+conda run -n asteroid-belt-runner python train/train_ppo.py --init-from models/ppo_traverse_n40_63pct.zip \
+  --curriculum --n-asteroids 80 --n-start 40 --net-width 512 --ent-coef 0.05 --exit-r-end 0 0 --timesteps 4_000_000
+# 加长陨石带（带长 1100m，max_steps 自动放宽，密度自己加）
+conda run -n asteroid-belt-runner python train/train_ppo.py --belt-len 1100 --n-asteroids 120 --timesteps 4_000_000
+# 带内随机点任务（tier2：进球且速度≤12）
+conda run -n asteroid-belt-runner python train/train_ppo.py --goal-mode interior_point --arrival-speed 12 \
+  --init-from models/ppo_traverse_n40_63pct.zip --curriculum --n-asteroids 40 --n-start 20 --net-width 512 --ent-coef 0.05
 # 训练（真实 17 推进器）
 conda run -n asteroid-belt-runner python train/train_ppo.py --dynamics realistic --timesteps 3000000 --run-name ppo_realistic_v1
 # 评估成功率
