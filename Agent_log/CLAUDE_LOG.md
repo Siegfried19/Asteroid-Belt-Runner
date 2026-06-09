@@ -105,6 +105,16 @@
 - **主力模型**:`logs/ppo_rebuild_v15/best/best_model.zip`(=1.5M checkpoint,41%)。改进方向:早停/降LR 治后段
   发散、proximity reward 降碰撞率。看回放:`Agent_tool/watch.sh logs/ppo_rebuild_v15/best/best_model.zip 30 40`。
 
+## 2026-06-08 — 换回 Python 3.10 + 可见出口标记
+
+- 用户问"为什么会崩、我自己从没遇到过"。讲清:崩溃 = torch 2.2.1 `_dynamo` import 偶发段错误(~15%),
+  **只在 import 发作**;用户平时单进程/手动用法几乎不触发,是我"**16 个 spawn worker 各自重新 import**"
+  把概率放大了 16 倍才暴露。换 Python 版本不解决(3.11 一样崩)。
+- **换回 3.10**(3.11 无任何好处,回到原本测试过的环境)。重建 asteroid-belt-runner=py3.10+同栈+imageio,
+  check_env 过。forkserver/警告保留。CLAUDE.md/README 改回 3.10。
+- **加可见出口标记**:build_scene 加半透明绿球 geom `goal_marker`(无碰撞),env reset 时移到随机出口
+  (`model.geom_pos`)并按 goal_radius 设大小——viewer 里能直接看到"该飞到哪个出口"。
+
 ## 2026-06-08 — 任务改造(随机出口+求快) + Python 3.11 根治尝试(失败,保留 forkserver)
 
 - **任务改造**(用户要加难度)：①**随机偏轴出口**——每回合目标改为点 `(goal_x, gy, gz)`,gy/gz 偏轴

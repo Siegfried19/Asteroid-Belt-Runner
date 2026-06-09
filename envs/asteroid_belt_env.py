@@ -144,6 +144,9 @@ class AsteroidBeltEnv(gym.Env):
         self.ship_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "ship_collision"
         )
+        self.goal_marker_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "goal_marker"
+        )
         # ship collision proxy = oriented box hugging the STL — collisions are detected
         # geometrically against the asteroids' conservative spheres (r_eff), see _box_collision.
         self.ship_box_half = np.asarray(self.base_cfg.ship_box_half, dtype=float)
@@ -341,6 +344,9 @@ class AsteroidBeltEnv(gym.Env):
         th = self.np_random.uniform(0.0, 2.0 * np.pi)
         rho = self.np_random.uniform(self.exit_r_min, self.exit_r_max)
         self.goal = np.array([self.goal_x, rho * np.cos(th), rho * np.sin(th)])
+        if self.goal_marker_id >= 0:                       # move the visible exit-zone marker
+            self.model.geom_pos[self.goal_marker_id] = self.goal
+            self.model.geom_size[self.goal_marker_id, 0] = self.goal_radius
         # scatter the asteroids for this episode
         self._place_asteroids(self.np_random)
         mujoco.mj_forward(self.model, self.data)

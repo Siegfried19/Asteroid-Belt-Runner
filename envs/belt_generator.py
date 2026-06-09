@@ -264,6 +264,15 @@ def build_scene(cfg: BeltConfig = None, base_xml: str = "environment.xml",
         from envs.thruster_layout import add_thrusters
         add_thrusters(spec, SHIP_BODY)
     asteroids = add_belt(spec, cfg)
+    # translucent "exit zone" marker (visual only); the env moves it to the random goal each reset
+    marker = spec.worldbody.add_geom()
+    marker.name = "goal_marker"
+    marker.type = mujoco.mjtGeom.mjGEOM_SPHERE
+    marker.size = [25.0, 0, 0]
+    marker.pos = [0.0, 0.0, 0.0]
+    marker.contype = 0
+    marker.conaffinity = 0
+    marker.rgba = [0.2, 1.0, 0.3, 0.22]
     model = spec.compile()
     return model, spec, asteroids
 

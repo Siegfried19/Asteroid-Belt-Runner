@@ -74,8 +74,8 @@ Agent_tool/watch.sh models/ppo_v15_best_41pct.zip 30 40   # watch it fly (needs 
 ## ⚡ Quickstart
 
 ```bash
-# 1) Build the env (Python 3.11; the RL stack needs numpy < 2)
-conda create -n asteroid-belt-runner python=3.11 -y
+# 1) Build the env (Python 3.10; the RL stack needs numpy < 2)
+conda create -n asteroid-belt-runner python=3.10 -y
 conda run -n asteroid-belt-runner pip install \
     "mujoco==3.3.7" "gymnasium==0.29.1" "stable-baselines3==2.3.0" \
     "numpy<2" "torch==2.2.1" pynput tensorboard "imageio[ffmpeg]"
