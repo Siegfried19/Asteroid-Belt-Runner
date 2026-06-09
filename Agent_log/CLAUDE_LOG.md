@@ -277,3 +277,106 @@ render_scene.py + eval_policy(--exit-r/--max-steps) + preview 改进。logs/ 下
   curriculum 现 ramp 密度+偏离+航程三维。env 新增 reward 项:closing/proximity 拆分、arrival(关)、anti-retreat。
 - **env 默认是调试中间态**(goal_radius 60 放宽等);下次从 `REWARD_EXPERIMENTS.md` 末尾 "下次 TODO" 继续。
 - 训练产物 `logs/ppo_*`(git-ignored);最佳极简模型 `logs/ppo_diag_net512`(100%)。
+
+## 2026-06-09 — 换新机器(i9-14900K/64G/RTX4090),接航程 curriculum TODO 起训
+
+- **新机器**:i9-14900K(32线程)/64G/RTX 4090 24G/73G 空闲——比上台(i7-14700F/RTX4070S)强。
+  `asteroid-belt-runner` env 已在;`check_env` 过(obs=160,两动力学 OK,随机策略多 timeout/少撞,合理)。
+- **logs/ 只剩旧 run**(v2/v4/v11/v15):net512/diag_net512/n40 是 git-ignored,没随仓库过来→需重训。
+- 确认代码能力齐:`--traverse/--net-width/--exit-r-end/--n-start/--curriculum`、env `set_traverse`、
+  eval_policy `--exit-r/--max-steps/--n-asteroids` 都在。
+- **建 todolist + 起训 REWARD_EXPERIMENTS.md 末尾 TODO 第1步(破航程断崖)**:
+  `--curriculum --traverse 300 700 --n-asteroids 40 --n-start 5 --net-width 512 --timesteps 4_000_000 --exit-r-end 0 0`。
+- **首训失败(0% success / 73%撞 / 27%出界)→ 抓到 TODO 命令行 bug**:漏传 `--ent-coef`→默认 0.0,
+  而 net512 突破靠 **ent0.05**(台账载 ent0.05→0.02 即 22%→6%)。满难度后段 1.6M 步 return 完全平(-890)=
+  卡死"撞"局部最优,非训练不足。i9+4090 跑 4M 仅 ~28 分钟。
+- **重起干净 A/B:只补 `--ent-coef 0.05`,余同**。详见 REWARD_EXPERIMENTS.md。
+
+## 2026-06-09 🎉 航程断崖其实早破了——真凶是 best_model 选择 bug;满航程 n40=63%
+
+- ent0.05 run 训完(~14 分钟),eval `best_model.zip` 仍 0%——但那是假象。**直接测 final `model.zip`**:
+  **ent0.05 = 63% success / 37%撞 / oob 0% / timeout 0%;ent0 = 60%**。**航程断崖破了**(上台机器 85% oob 消失)。
+- **根因**:EvalCallback `n_eval_episodes=10`、eval 方差 ±800 → best_model 纯运气选中 50K 早期噪声(-402),
+  真正训好的 final 在自己 10 集上运气差(-951)→ 我们一直在测 50K 垃圾。**ent_coef 其实几乎无差**(63 vs 60)。
+- **修复**:train_ppo.py `n_eval_episodes` 10→40(降 SEM);约定**永远同时测 final model.zip**。
+- 主力模型存 `models/ppo_traverse_n40_63pct.zip`(当前真实架构历史新高;README 旧 41% 是旧简化架构)。
+- 仅剩失败模式=碰撞 37-40%。下一步:降碰撞 或 推 curriculum 加难(密度/收球/off-axis exit)。
+
+## 2026-06-09 — 推 n135 加难,踩到 build 端 numpy corruption(高密度放大);sqrt 修复
+
+- **起 n135 curriculum(8M)→ 启动几乎必崩**:`sample_belt` 里 `np.linalg.norm` 抛
+  `'Float64DType' object has no attribute 'dtype'`。n40 没事、n135 几乎每次——因为 sample_belt 拒绝采样在
+  n135 下 norm 调用量是 n40 的几十倍(135×200×~100 placed),16 个 forkserver worker 并发 build 撞上 **C 层
+  numpy 内存 corruption**(和当年 spawn 放大 torch flake 同理)。单进程少量调用不易现。
+- **诊断**:单进程密集压测 sample_belt → 吐出**每次不同的荒诞 TypeError**(`type+float`、
+  `range_iterator*range_iterator`、`BeltConfig not callable`)= 内存 corruption 铁证,非逻辑 bug。
+  加 `OMP/OPENBLAS/MKL_NUM_THREADS=1` 后单进程 500 次 0 失败 → **numpy 多线程重入是诱因之一**。
+- **修复**:`envs/belt_generator.py sample_belt` 热循环**去掉 `np.linalg.norm`**,改纯 Python 标量
+  `sqrt(dot)`(更快且绕开崩溃代码路径)。16-worker forkserver build 崩溃率从旧码 ~100% 降到 ~25%。
+  残余靠 `train_resilient.sh`(单线程 + resume 重试 12×)兜住:build 只发生一次,过了就稳训。
+- **n135 训练已起**(`train_resilient.sh ppo_n135_... 8000000 135 --curriculum --traverse 300 700 --n-start 5
+  --net-width 512 --exit-r-end 0 0 --ent-coef 0.05`):attempt1 崩 build、attempt2 进入训练并持续推进。
+- **train_ppo.py 修**:EvalCallback `n_eval_episodes` 10→40(原 ±800 方差致 best_model 选噪声)。
+
+## 2026-06-09 — 会话恢复:停 n135 训练 + 用最佳模型演示 + 规划两个新方向(待实现)
+
+会话中断后恢复。用户在远程桌面(DISPLAY=:1)观看,要求**不开训练、不做破坏性操作**。
+- **停掉**上次遗留的后台训练 `ppo_n135b_0609_1552`(n135/8M/curriculum,PID 31891/31897/31902)。
+- **演示最佳模型** `models/ppo_traverse_n40_63pct.zip`:给 `Agent_tool/rollout_viewer.py` 加
+  `--exit-r` 开关(对齐模型真实训练条件)。①简单版 n40/exit0:6 集 2 成功 2 撞(符合 63%)。
+  ②困难版 n135/exit90-150:全撞/出界(n40 直线模型没训过这密度+偏离,符合预期)。build 报
+  `105/135 fit (min_gap=55);30 parked`——n135 实际有效密度仅 ~105。
+- **澄清模型谱系**:简单版(n40 直线穿越)已训通 63%(当前架构历史新高);困难版(n135+大偏离)
+  从未训通,是下一座山。
+
+**规划的两个新方向(用户拍板设计,本轮只 log、暂不实现):**
+1. **加长陨石带**:改 `BeltConfig.belt_x_range`(如 600→1000m),目标 X 自动跟随末端;配套
+   `n_asteroids` 按比例加保密度。**`max_steps` 要给得很宽松**(远超够用,不让它成为约束)——
+   只有**严重超时**才截断,不能因步数不够误判失败。航程 curriculum 已就绪。
+2. **新任务「飞到陨石带内部随机点」**(**新增 `goal_mode` 开关,保留 traverse**):
+   - `reset()` 在 `interior_point` 模式下 X 在带内随机、yz 在截面内随机;**新逻辑**:目标点
+     对所有小行星做 clearance 检查(避免落在石头里)。
+   - **随机点需保证一定 X 方向深度**(不能太浅/紧贴入口):X 采样下界要离带子起点有最小 depth,
+     强制飞船真正飞进带子。
+   - **到达判定分档递进**(用户定的难度阶梯):①先「进入目标球即成功」(复用现有逻辑,最易) →
+     ②加「进入且速度<阈值」→ ③阈值可配置/每集随机指定目标速度。
+   - 架构天然支持:obs 已含本体系目标方向/距离,reward 已是任意目标点势能引导,网络/reward 基本不动。
+
+**当前工作区(未 commit):** train_ppo(n_eval 40 + warm_belt_cache)、belt_generator(布局缓存绕
+numpy corruption)、.gitignore(.belt_cache/)、rollout_viewer(+--exit-r)、日志。`models/ppo_traverse_n40_63pct.zip` 主力模型。
+
+## 2026-06-09 — 整理:审查工作区 + 改正过时 41% 文档 + track 新主力模型
+
+用户要求整理代码与 log(不新增功能)。审查结论:
+- **未提交代码改动全部自洽**(train_ppo/belt_generator/.gitignore/rollout_viewer),无残留乌龙。
+  台账与日志是追加式诚实记录(漏 ent / best_model bug 等乌龙已如实自纠),**不改写历史**。
+- **唯一残留乌龙=过时的 41%** 散落 3 处,已改正(只改错信息,不加功能):
+  - `README.md`:badge 41%→63%;Result 表 → 63%/oob0%/timeout0%/coll37%(标注 n40 直线)+ "Still open"
+    块讲清大偏离&n135 仍未解;去掉"rewarded for doing it fast"(speed reward 早已删除);roadmap 同步。
+  - `models/README.md`:新增 `ppo_traverse_n40_63pct.zip` 段(当前最佳, viewer 命令);v15 旧"修正"段
+    改为"straight 已 63%、hard task(off-axis+n135)仍开放"(原写"当前架构从未训通/~2%"已过时)。
+- **新主力模型 `models/ppo_traverse_n40_63pct.zip` 已 `git add`**(staged,未 commit,随 v15 进 git 快照区)。
+- **保留的调试态(未动)**:`asteroid_belt_env.py:64 goal_radius=60 DIAG(temp)`(最终目标 35,属训练中间态);
+  `eval_policy.py --n-asteroids` 默认 135(跑评估别忘了按模型传 40)。
+- **`PROJECT_PLAN.md` 同步更新**:那段"从未训通/0–2%"→改为"直线已 63%、hard task(off-axis+n135)仍开放"+
+  关键教训(net512/best_model bug);**两个新方向(加长带子、内部随机点)正式补进路线图**(待实现 checklist)。
+
+## 2026-06-09 — 17 推进器:火焰可视化工具 + RCS 改对称布局(参数化)
+
+用户想"看推进器喷口火焰"并质疑布局对称性。澄清+落地:
+- **澄清:喷口角度固定,不可调**。当前 17 推进器每个都是固定方向单向力(`act.gear` 写死),6-DOF 靠
+  "固定多喷口的位置/朝向组合"实现(符合真实 RCS 工程),**不是**矢量/万向节喷口。可调角度=新建模(动作空间
+  涨到~51 维、映射变双线性非凸、探索更难),且真实模式还没开训,**用户决定先维持固定喷口**。
+- **新增火焰可视化工具(`Agent_tool/`)**:`thruster_flames.py`(helper:按推力强度在每个喷口画 capsule 火焰,
+  沿喷口反方向喷出,用 `mjv_connector` + viewer.user_scn 渲染,不碰物理);`thruster_flame_viewer.py`(动态:
+  飞机做对称机动,火焰随推力 0→max→0 呼吸);`thruster_layout_viewer.py`(静态:锁住飞机、17 喷口全亮、
+  按组着色 main橙/reverse红/rcs青 + 图例,`--cycle` 逐个点亮报名)。
+- **RCS 改对称布局(仍 12 个,动作空间不变,无模型作废)**:旧布局是"最小喷口拼可控性"的产物——±Z 比 ±Y
+  多一倍喷口(roll 力偶都是 ±Z)、前后喷口对角放(offset for roll)。**新布局**:8 竖直(±Z)在四角
+  (±RCS_X, ±RCS_ZY, 0) 镜像对称(纯升力力矩天然抵消/前后差动=俯仰/左右差动=滚转)+ 4 水平(±Y)在前后中线
+  (±RCS_X,0,0)(纯侧移/前后差动=偏航)。verify `wrench rank=6` 六轴正负全可达、env realistic reset/step OK。
+- **几何参数化**:顶部 `MAIN_X/REV_X/RCS_X/RCS_ZY` 常量,改一个数所有相关喷口一起动,方便自调。
+  用户最终调到 `RCS_X=6.0`(更贴机身)、`RCS_ZY=4.5`、`MAIN_X=-11`。
+- **flame_viewer 机动表**同步对称版,新增纯 roll/pitch/yaw 旋转机动。
+- 渲染命令:`DISPLAY=:1 conda run -n asteroid-belt-runner python Agent_tool/thruster_layout_viewer.py`;
+  可控性自检:`conda run -n asteroid-belt-runner python envs/thruster_layout.py`。

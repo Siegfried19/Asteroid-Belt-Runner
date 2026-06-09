@@ -11,7 +11,7 @@
   <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.2.1%2Bcu121-ee4c2c">
   <img alt="SB3" src="https://img.shields.io/badge/Stable--Baselines3-PPO-44a833">
   <img alt="Gymnasium" src="https://img.shields.io/badge/Gymnasium-0.29-0b7285">
-  <img alt="status" src="https://img.shields.io/badge/controller-traverses%20%4041%25-success">
+  <img alt="status" src="https://img.shields.io/badge/controller-traverses%20%4063%25-success">
 </p>
 
 <p align="center"><img src="images/F8C_in_space_-_Isometric.jpg" width="70%"></p>
@@ -42,21 +42,26 @@ around it**: it has to weave through the rocks.
 - **🪨 Procedural "potato" belt** — irregular bumpy meshes, power-law sizes, slow drift + spin, guaranteed-passable gaps,
   rebuilt cheaply every episode.
 - **🎯 Random off-axis exits** — each run the goal pops up at a random spot on the far side, so the ship must *navigate*,
-  not just punch straight through — and it's rewarded for doing it **fast**.
+  not just punch straight through. (Still the open frontier — see Result below.)
 - **🎓 Curriculum learning** — density ramps from sparse to full as the policy improves.
 
 ## 📊 Result
 
-The simplified-dynamics controller **learns to thread the belt**:
+The simplified-dynamics controller **learns to thread the belt** (sparse belt, straight traverse, 100 episodes):
 
 | metric | value |
 |---|---|
-| ✅ success (reaches the exit) | **41 %** |
+| ✅ success (reaches the exit) | **63 %** |
 | 🚧 out-of-bounds (skirting / bailing) | **0 %** |
-| 💥 collision | 59 % |
+| ⏱️ timeout | **0 %** |
+| 💥 collision | 37 % |
 
-0 % out-of-bounds is the headline: the policy genuinely flies *through* the gaps instead of sneaking around the belt.
-Pre-trained weights: [`models/ppo_v15_best_41pct.zip`](models/).
+0 % out-of-bounds / timeout is the headline: the policy genuinely flies *through* the gaps to the far side instead of
+sneaking around or stalling. Pre-trained weights: [`models/ppo_traverse_n40_63pct.zip`](models/).
+
+> **Still open:** that 63 % is on the *sparse, straight-traverse* task (40 rocks, goal on-axis). The harder
+> targets — **random off-axis exits** and a **dense belt** (135 rocks) — aren't solved yet: the policy collapses
+> into a "ram straight through" local optimum. That's the current frontier (`Agent_log/REWARD_EXPERIMENTS.md`).
 
 ```bash
 Agent_tool/watch.sh models/ppo_v15_best_41pct.zip 30 40   # watch it fly (needs a display)
@@ -117,5 +122,5 @@ main.py          # manual keyboard play (for fun)
 - [x] Realistic 17-thruster dynamics model (2 main · 3 retro · 12 RCS) — built & 6-DOF verified
 - [ ] Keyboard flight control for both dynamics modes
 - [ ] Train the controller on the realistic 17-thruster dynamics
-- [ ] Push success past 41 % (early-stopping + collision-aware reward)
+- [ ] Solve the hard task past 63 % — random off-axis exits + dense (135-rock) belt (break the ram-through optimum)
 </content>

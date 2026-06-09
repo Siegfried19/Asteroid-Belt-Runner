@@ -32,3 +32,6 @@ wandb/
 
 # stray redirected output
 *.out
+
+# precomputed belt layouts (sample_belt cache)
+.belt_cache/

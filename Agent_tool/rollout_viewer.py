@@ -29,10 +29,15 @@ def main():
     p.add_argument("--n-asteroids", type=int, default=60)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--episodes", type=int, default=5)
+    p.add_argument("--exit-r", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                   help="override exit off-axis range to match the model's training "
+                        "(e.g. --exit-r 0 0 for a straight traverse)")
     args = p.parse_args()
 
     cfg = BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed)
     env = AsteroidBeltEnv(cfg=cfg, randomize_belt=False)
+    if args.exit_r is not None:
+        env.set_exit_r(args.exit_r[0], args.exit_r[1])
     model = PPO.load(args.model, device="cpu")
 
     with mujoco.viewer.launch_passive(env.model, env.data) as viewer:

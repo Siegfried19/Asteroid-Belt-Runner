@@ -68,17 +68,27 @@
 - **v3**（+proximity 惩罚 d_safe=12 / +spin 惩罚 / collision 100→300 / 课程 12→60）：训练中，待评估。
 - 课程学习已实现：`env.set_n_asteroids()` + `train CurriculumCallback`（`--curriculum --n-start N`）。
 
-### ⚠️ 2026-06-09 现状更正（off-axis exit 后从未训通）
-- 上面的 100%/41% 都是**早期"直线穿越"任务**（无 off-axis exit）的成绩。commit `654bdb3` 引入
-  **随机偏离出口 + speed reward** 后，当前"最终架构"（雷达 obs / F8C 推力 / off-axis）**从未训通**：
-  放大(600m×180m×135)+大偏离(exit_r 90-150)下 6 轮训练全 **0–2%**，连**偏离=0 也 0%**。
-- **根因：冲撞局部最优**——progress 奖励沿途刷分把策略推向"全速冲撞"，学到的策略比"不动"（安全超时，
-  ≈-66）还差（eval reward 反复收敛 **-297**）。机动性充足（fwd 103.5 / lat 40 m/s²），非物理瓶颈。
-  v15 模型在当前 env 只剩 **2%**。完整记录见 `Agent_log/CLAUDE_LOG.md` 2026-06-09。
-- **攻坚方案**：①干净复现"原 reward + exit_r=0 + 原场景"验证可学性是否还在；②打破冲撞局部最优
-  （去 speed reward / 限飞船最大速度 / progress 封顶 / ent_coef↑）；③阶梯加 off-axis 找"通过率 vs 偏离"边界。
-- **已落地可复用基础设施**：curriculum 支持密度+偏离同步爬（`--exit-r-end --ramp-frac --ent-coef`）；
-  `eval_policy --exit-r` 可指定偏离评估；`Agent_tool/render_scene.py` 离屏出图；场景已放大至 600m×180m。
+### 2026-06-09 现状（直线穿越已破 63%；hard task 仍开放）
+- 历史脉络：早期 100%/41% 都是**"直线穿越"任务**（无 off-axis exit）的成绩。commit `654bdb3` 引入
+  **随机偏离出口 + speed reward** 后曾一度卡死，6 轮训练 0–2%（**冲撞局部最优**：progress 奖励沿途刷分
+  把策略推向"全速冲撞"，比"不动"还差）。
+- **突破（当前架构历史新高）**：去 speed reward + closing 逼近惩罚做避障主力 + **net512 + 航程 curriculum**
+  后，**满航程 700m / n40 / 直线 = SUCCESS 63%、oob 0% / timeout 0%、仅剩碰撞 37%**。主力模型
+  `models/ppo_traverse_n40_63pct.zip`。航程"恐惧倒退"oob 被 curriculum 治好。
+- **关键教训**：①真正瓶颈一度是**网络容量**（net512 才学得动），别死磕 reward；②`EvalCallback n_eval_episodes`
+  方差大→`best_model` 选噪声，**永远同时测 final `model.zip`**（已修 n_eval 10→40）。
+- **hard task 仍开放**：①大偏离 off-axis exit（90-150）、②高密度 n135——这两档尚未训通，仍是冲撞局部最优。
+- **可复用基础设施**：curriculum 密度+偏离+航程三维同步爬（`--curriculum --exit-r-end --traverse --ramp-frac
+  --ent-coef --net-width`）；`eval_policy --exit-r/--n-asteroids` 指定难度评估；`rollout_viewer --exit-r` 可视；
+  `belt_generator` 布局磁盘缓存（绕高密度 numpy corruption）；`render_scene.py` 离屏出图；场景 600m×180m。
+- **下一步二选一**：①降 n40 碰撞 或 ②推 curriculum 加难（密度 40→80→135 / `goal_radius` 60→35 / off-axis 0→150）。
+
+### 新任务方向（2026-06-09 用户提出，待实现；详见 CLAUDE_LOG）
+- [ ] **加长陨石带**：`BeltConfig.belt_x_range` 拉长（如 600→1000m），`n_asteroids` 按比例加保密度，
+      **`max_steps` 放宽到远超够用**（只严重超时才截断，不让步数误判失败）。
+- [ ] **新任务「飞到陨石带内部随机点」**（新增 `goal_mode` 开关，保留 traverse）：
+      `reset()` 在 `interior_point` 模式下 X 在带内随机（**保证最小 X 深度**，不贴入口）、yz 截面内随机；
+      目标点对所有小行星做 clearance 检查。到达判定分档递进：①进球即成功 → ②进球且速度<阈值 → ③阈值可配置。
 
 ### Phase 5 — 两套动力学的键盘飞控（Roadmap #4）
 - [ ] 扩展 `manual_controller.py`：在直接速度控制之外，增加力/推力模式，可切换

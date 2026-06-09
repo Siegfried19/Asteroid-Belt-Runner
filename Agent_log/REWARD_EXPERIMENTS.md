@@ -135,6 +135,40 @@ anti-retreat w_retreat2)、belt_x 700(build 全范围)、belt_yz 180、n135/exit
 3. 每档 net512+curriculum,台账记录。**最终目标:放大(700×180×135)+大偏离(90-150)+球35 高 success。**
 - 已验证最佳模型:`logs/ppo_diag_net512`(极简 100%)、`logs/ppo_n40`(n40 短航程 72%)。
 
+## 2026-06-09(新机器 i9-14900K/4090)— 航程 curriculum 首训失败 → 抓到漏 ent_coef
+
+| run | 配置 | success | coll | oob | timeout | 结论 |
+|-----|------|--------:|-----:|----:|--------:|------|
+| traverse_0609_1129 | TODO 命令原样: traverse300→700, n40, n_start5, net512, 4M, exit0, **ent默认0.0** | **0%** | 73% | 27% | 0% | ❌失败,卡死局部最优 |
+
+**[失败诊断]** 满难度 eval(始终满航程,curriculum 只 ramp 训练 env)全程负;后段 1.6M 步在满难度上
+return **完全平(-722→-898→-890,零上升趋势)= 卡死"撞"局部最优**,非训练不足。
+**根因:漏了 ent_coef。** TODO 给的命令行漏传 `--ent-coef`→ 取默认 **0.0**;而 net512 突破配方靠 **ent0.05**
+(本台账明载"ent0.05→0.02 即 22%→6%,探索是关键不能降")。ent0=探索几乎为零→立刻塌进 ram 吸引盆。
+best_model 选中 50K 早期噪声(满难度上巧合最好),无用。
+
+**下一步(干净 A/B,只改 ent_coef 0→0.05,余同失败 run):**
+`--curriculum --traverse 300 700 --n-asteroids 40 --n-start 5 --net-width 512 --timesteps 4_000_000 --exit-r-end 0 0 --ent-coef 0.05`
+
+## 2026-06-09 🎉 真相:航程断崖早破了,被 best_model 选择 bug 骗了!满航程 n40 = 63%
+
+**两次 run 评估的是 `best_model.zip`(都被选成 50K 早期噪声)→ 误判失败。直接测 `model.zip`(final):**
+
+| run | final model @ 满航程 n40 exit0(确定性100集) | success | coll | oob | timeout |
+|-----|------|--------:|-----:|----:|--------:|
+| ent0.05 | logs/ppo_traverse_ent05_0609_1316/**model.zip** | **63%** | 37% | **0%** | 0% |
+| ent0    | logs/ppo_traverse_0609_1129/**model.zip** | **60%** | 40% | **0%** | 0% |
+
+- **航程断崖破了**:满航程 700m/n40/exit0 = **60-63% success,oob 0%/timeout 0%**。上台机器"恐惧倒退 85% oob"消失,
+  curriculum 真起效。**当前架构(雷达 obs/F8C 推力/满航程)历史新高**(README 旧 41% 是旧简化架构)。
+- **ent_coef 几乎无差**(63 vs 60,噪声内);两次训练末 2000 ep 都 ~63% R>0。我的"漏 ent"假设错,但不重要。
+- **根因 = EvalCallback `n_eval_episodes=10` 方差 ±800 → best_model 纯靠运气选中 50K 噪声**(-402),真正训好的
+  final 在自己那 10 集上运气差(-951)→ 一直在测 50K 垃圾。**已修:n_eval_episodes 10→40 + 永远同时测 final model.zip。**
+- 仅剩失败模式=**碰撞 37-40%**(不再 oob/timeout)。主力模型存 `models/ppo_traverse_n40_63pct.zip`。
+
+**下一步:** ①降 n40 碰撞(更多步/避障调参) 或 ②直接推 curriculum 加难:密度 40→80→135、收 goal_radius 60→35、
+加 off-axis exit 0→30→60→90→150。每档训完**测 final model.zip**台账记录。
+
 ## 待探索变量清单
 - **reward**: w_dist, w_proximity, d_safe, w_closing, d_close, collision_penalty, success_bonus,
   time_cost, w_heading, goal_radius；惩罚曲线形状(二次/反比/指数)。

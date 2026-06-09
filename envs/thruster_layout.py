@@ -19,31 +19,39 @@ MAIN_THRUST = 5.0e6      # N, per main engine (2 -> ~1e7 forward, ~matches old F
 REVERSE_THRUST = 1.6e6   # N, per reverse thruster (weaker, as in-game)
 RCS_THRUST = 1.0e6       # N, per RCS thruster
 
+# --- RCS geometry: tweak these to reshape the layout (all positions in m, ship frame) ---
+MAIN_X = -11.0   # main engines longitudinal station (rear)
+REV_X  =  11.0   # reverse thrusters longitudinal station (nose)
+RCS_X  =   6.0   # fore/aft RCS station |x| (pulled in toward center -> sits on the hull)
+RCS_ZY =   4.5   # vertical (±Z) quad half-spread in y -> roll moment arm ("opened" wider)
+
 # (name, position [m], thrust direction [unit], max thrust [N], group)
+# Naming: f/a = fore(+x)/aft(-x), l/r = left(+y)/right(-y); zp/zn = +Z/-Z, yp/yn = +Y/-Y.
 THRUSTERS = [
     # --- 2 main engines: rear, push +X ---
-    ("main_l", (-11.0,  2.0,  0.0), (1, 0, 0), MAIN_THRUST, "main"),
-    ("main_r", (-11.0, -2.0,  0.0), (1, 0, 0), MAIN_THRUST, "main"),
+    ("main_l", (MAIN_X,  2.0,  0.0), (1, 0, 0), MAIN_THRUST, "main"),
+    ("main_r", (MAIN_X, -2.0,  0.0), (1, 0, 0), MAIN_THRUST, "main"),
     # --- 3 reverse thrusters: nose, push -X (braking) ---
-    ("rev_c", (11.0,  0.0,  0.0), (-1, 0, 0), REVERSE_THRUST, "reverse"),
-    ("rev_l", (11.0,  2.0,  0.0), (-1, 0, 0), REVERSE_THRUST, "reverse"),
-    ("rev_r", (11.0, -2.0,  0.0), (-1, 0, 0), REVERSE_THRUST, "reverse"),
-    # --- 12 RCS: fore (x=+9) and aft (x=-9) quads, ±Y and ±Z, offset for roll authority ---
-    # ±Y thrusters offset in z -> produce roll; fore/aft pair -> yaw or pure Y
-    ("rcs_fore_yp_zt", ( 9.0, 0.0,  3.0), (0,  1, 0), RCS_THRUST, "rcs"),
-    ("rcs_fore_yn_zt", ( 9.0, 0.0,  3.0), (0, -1, 0), RCS_THRUST, "rcs"),
-    ("rcs_aft_yp_zb",  (-9.0, 0.0, -3.0), (0,  1, 0), RCS_THRUST, "rcs"),
-    ("rcs_aft_yn_zb",  (-9.0, 0.0, -3.0), (0, -1, 0), RCS_THRUST, "rcs"),
-    # ±Z thrusters offset in y -> produce roll; fore/aft pair -> pitch or pure Z
-    ("rcs_fore_zp_yr", ( 9.0,  3.0, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
-    ("rcs_fore_zn_yr", ( 9.0,  3.0, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
-    ("rcs_aft_zp_yl",  (-9.0, -3.0, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
-    ("rcs_aft_zn_yl",  (-9.0, -3.0, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
-    # roll couples (z-thrust at ±y) for dedicated roll authority both signs
-    ("rcs_roll_a", (0.0,  4.0, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
-    ("rcs_roll_b", (0.0, -4.0, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
-    ("rcs_roll_c", (0.0,  4.0, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
-    ("rcs_roll_d", (0.0, -4.0, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
+    ("rev_c", (REV_X,  0.0,  0.0), (-1, 0, 0), REVERSE_THRUST, "reverse"),
+    ("rev_l", (REV_X,  2.0,  0.0), (-1, 0, 0), REVERSE_THRUST, "reverse"),
+    ("rev_r", (REV_X, -2.0,  0.0), (-1, 0, 0), REVERSE_THRUST, "reverse"),
+    # --- 12 RCS: a SYMMETRIC layout (vertical quad + horizontal pair) ---
+    # 8 vertical (±Z) at the 4 corners (±RCS_X, ±RCS_ZY, 0): all +Z = pure heave; fore/aft diff
+    # = pitch; left/right diff = roll. Mirror-symmetric, so pure translation needs no roll cancel.
+    ("rcs_fl_zp", ( RCS_X,  RCS_ZY, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
+    ("rcs_fl_zn", ( RCS_X,  RCS_ZY, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
+    ("rcs_fr_zp", ( RCS_X, -RCS_ZY, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
+    ("rcs_fr_zn", ( RCS_X, -RCS_ZY, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
+    ("rcs_al_zp", (-RCS_X+1,  RCS_ZY+1, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
+    ("rcs_al_zn", (-RCS_X+1,  RCS_ZY+1, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
+    ("rcs_ar_zp", (-RCS_X+1, -RCS_ZY-1, 0.0), (0, 0,  1), RCS_THRUST, "rcs"),
+    ("rcs_ar_zn", (-RCS_X+1, -RCS_ZY-1, 0.0), (0, 0, -1), RCS_THRUST, "rcs"),
+    # 4 horizontal (±Y) at the fore/aft centerline (±RCS_X, 0, 0): all same = pure sway;
+    # fore/aft diff = yaw. (Roll is fully covered by the vertical quad above.)
+    ("rcs_f_yp", ( RCS_X, 0.0, 0.0), (0,  1, 0), RCS_THRUST, "rcs"),
+    ("rcs_f_yn", ( RCS_X, 0.0, 0.0), (0, -1, 0), RCS_THRUST, "rcs"),
+    ("rcs_a_yp", (-RCS_X+1, 0.0, 0.0), (0,  1, 0), RCS_THRUST, "rcs"),
+    ("rcs_a_yn", (-RCS_X+1, 0.0, 0.0), (0, -1, 0), RCS_THRUST, "rcs"),
 ]
 
 THRUSTER_NAMES = [t[0] for t in THRUSTERS]

@@ -26,11 +26,15 @@ Run `python Agent_tool/preview_belt.py` to eyeball a generated belt, or
 `python envs/belt_generator.py` for a headless smoke test.
 """
 
+import hashlib
 import os
 from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
+
+# Cache dir for precomputed belt layouts (see sample_belt). Gitignored.
+_BELT_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".belt_cache")
 
 SHIP_BODY = "spacecraft"
 PARK_X = 5000.0   # x where unplaced asteroids are parked (far past the belt, out of play)
@@ -131,36 +135,89 @@ def _rand_quat(rng: np.random.Generator):
     return (q4, q1, q2, q3)
 
 
+def _belt_cache_key(cfg: BeltConfig, r_eff: np.ndarray) -> str:
+    """Deterministic key for a belt layout: everything sample_belt's output depends on."""
+    h = hashlib.sha1()
+    h.update(np.ascontiguousarray(r_eff, dtype=np.float64).tobytes())
+    for v in (cfg.seed, len(r_eff), cfg.belt_x_range, cfg.belt_yz_radius,
+              cfg.min_gap, cfg.spawn_clear_radius):
+        h.update(repr(v).encode())
+    return h.hexdigest()[:16]
+
+
 def sample_belt(cfg: BeltConfig, rng: np.random.Generator, r_eff: np.ndarray):
     """Rejection-sample non-overlapping asteroid centers in the belt slab.
 
     Returns (positions Nx3, placed_index) — placed_index aligns surviving rocks back
     to their r_eff entry. Larger rocks are placed first (easier to fit the big ones).
     Asteroids that cannot be fit after the attempt budget are dropped (logged by caller).
+
+    CACHED to disk (keyed on cfg+r_eff): at high density the rejection loop makes
+    enough numpy calls that 16 forkserver workers building concurrently trip a C-level
+    numpy memory-corruption flake (see CLAUDE.md). All workers compute the IDENTICAL
+    layout, so we compute it once (warm via warm_belt_cache in the main process) and let
+    workers load it -- no concurrent heavy sampling, no corruption. On a cache HIT we
+    return WITHOUT drawing from `rng`, so every loader keeps an identical rng state for
+    the downstream quat draws (consistency across workers; the warm process is discarded).
     """
+    key = _belt_cache_key(cfg, r_eff)
+    cache_file = os.path.join(_BELT_CACHE_DIR, f"belt_{key}.npz")
+    if os.path.exists(cache_file):
+        try:
+            d = np.load(cache_file)
+            return d["pos"], d["placed"]
+        except Exception:
+            pass  # corrupt/partial cache -> recompute below
+
     order = np.argsort(-r_eff)  # big first
-    placed_pos, placed_idx = [], []
+    placed_idx = []
     attempts_per = 200
+    # NOTE: the inner loop uses plain Python scalar math, NOT np.linalg.norm. At high
+    # density (n135 => ~135*200 attempts * up to ~100 placed) the sheer volume of norm()
+    # calls reliably tripped a C-level numpy corruption flake under 16 forkserver workers
+    # ('Float64DType has no attribute dtype'), exactly the way "spawn" amplified the torch
+    # flake. Scalar sqrt-of-dot avoids that code path entirely (and is faster). n40 rarely
+    # hit it (few calls); n135 hit it ~every launch. Do NOT reintroduce np.linalg.norm here.
+    placed_xyz = []  # list of (x, y, z) float tuples
+    clear2 = float(cfg.spawn_clear_radius)
     for idx in order:
-        r = r_eff[idx]
+        r = float(r_eff[idx])
         for _ in range(attempts_per):
-            x = rng.uniform(*cfg.belt_x_range)
-            rho = cfg.belt_yz_radius * np.sqrt(rng.uniform(0.0, 1.0))
-            theta = rng.uniform(0.0, 2.0 * np.pi)
-            y, z = rho * np.cos(theta), rho * np.sin(theta)
-            p = np.array([x, y, z])
-            if np.linalg.norm(p) < cfg.spawn_clear_radius + r:
+            x = float(rng.uniform(*cfg.belt_x_range))
+            rho = float(cfg.belt_yz_radius) * float(np.sqrt(rng.uniform(0.0, 1.0)))
+            theta = float(rng.uniform(0.0, 2.0 * np.pi))
+            y, z = rho * float(np.cos(theta)), rho * float(np.sin(theta))
+            if (x * x + y * y + z * z) ** 0.5 < clear2 + r:
                 continue
             ok = True
-            for q, j in zip(placed_pos, placed_idx):
-                if np.linalg.norm(p - q) < r + r_eff[j] + cfg.min_gap:
+            for (qx, qy, qz), j in zip(placed_xyz, placed_idx):
+                min_d = r + float(r_eff[j]) + cfg.min_gap
+                dx, dy, dz = x - qx, y - qy, z - qz
+                if (dx * dx + dy * dy + dz * dz) < min_d * min_d:
                     ok = False
                     break
             if ok:
-                placed_pos.append(p)
+                placed_xyz.append((x, y, z))
                 placed_idx.append(idx)
                 break
-    return np.array(placed_pos).reshape(-1, 3), np.array(placed_idx, dtype=int)
+    pos = np.array(placed_xyz, dtype=float).reshape(-1, 3)
+    placed = np.array(placed_idx, dtype=int)
+    try:  # atomic-ish write so concurrent readers never see a partial file
+        os.makedirs(_BELT_CACHE_DIR, exist_ok=True)
+        # tmp MUST end in .npz, else np.savez appends .npz and os.replace renames the wrong path.
+        tmp = cache_file[:-4] + f".{os.getpid()}.tmp.npz"
+        np.savez(tmp, pos=pos, placed=placed)
+        os.replace(tmp, cache_file)
+    except Exception:
+        pass  # cache is an optimization; failing to write is non-fatal
+    return pos, placed
+
+
+def warm_belt_cache(cfg: BeltConfig):
+    """Single-process pre-build to populate the sample_belt disk cache BEFORE spawning
+    SubprocVecEnv workers. Workers then load the cached layout instead of each running the
+    corruption-prone concurrent rejection loop. Safe to call repeatedly (no-op on hit)."""
+    build_scene(cfg)
 
 
 def add_belt(spec: mujoco.MjSpec, cfg: BeltConfig):

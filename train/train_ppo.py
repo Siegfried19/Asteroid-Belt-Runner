@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # workers re-import this module to get make_env_fn; keeping torch out of module scope means the
 # workers never import torch (or its flaky TorchDynamo) at all -- only the env stack (gym/mujoco).
 from envs.asteroid_belt_env import AsteroidBeltEnv
-from envs.belt_generator import BeltConfig
+from envs.belt_generator import BeltConfig, warm_belt_cache
 
 
 def make_env_fn(n_asteroids, max_steps, seed, dynamics):
@@ -130,6 +130,14 @@ def main():
     run_dir = os.path.join(args.logdir, args.run_name)
     os.makedirs(run_dir, exist_ok=True)
 
+    # Warm the belt-layout cache in THIS (single) process before spawning SubprocVecEnv
+    # workers. At high density the per-worker rejection sampling tripped a numpy memory-
+    # corruption flake when 16 workers ran it concurrently; precomputing once means workers
+    # just load the layout. Warm both the train (seed) and eval (seed+1000) belts.
+    print(f"[train] warming belt cache (n={args.n_asteroids}) ...", flush=True)
+    warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed))
+    warm_belt_cache(BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed + 1000))
+
     env = make_vec_env(
         make_env_fn(args.n_asteroids, args.max_steps, args.seed, args.dynamics),
         n_envs=args.n_envs,
@@ -198,7 +206,11 @@ def main():
             best_model_save_path=os.path.join(run_dir, "best"),
             log_path=run_dir,
             eval_freq=max(50_000 // args.n_envs, 1),
-            n_eval_episodes=10,
+            # 10 eps had std ~+/-800 -> best_model selection was pure noise (once saved a lucky 50k
+            # checkpoint as "best" while the genuinely-good final model scored worse on its 10 eps).
+            # 40 eps tightens the SEM enough to pick the real best. Also: the final model.zip is
+            # often as good or better -- always eval BOTH best/ and the final model.zip.
+            n_eval_episodes=40,
             deterministic=True,
         ),
     ]
