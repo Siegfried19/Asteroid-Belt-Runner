@@ -42,9 +42,9 @@ MESHDIR_REL = os.path.join("assets", "asteroids")  # relative to environment.xml
 
 @dataclass
 class BeltConfig:
-    n_asteroids: int = 40                  # fewer, bigger rocks, with wide gaps for the 26 m ship
-    belt_x_range: tuple = (100.0, 500.0)   # slab the belt occupies along +X (ship punches through it)
-    belt_yz_radius: float = 120.0          # asteroids fill this radius of the X axis (no skirt corridor)
+    n_asteroids: int = 135                 # scaled with volume to hold ~constant density (see belt_x/yz)
+    belt_x_range: tuple = (100.0, 700.0)   # full 600 m; traverse curriculum ramps GOAL distance, asteroids fill all
+    belt_yz_radius: float = 180.0          # asteroids fill this radius of the X axis (no skirt corridor)
     # power-law size distribution: many small rocks, few large ones
     size_min: float = 5.0                  # base radius lower bound (m) -- no tiny debris
     size_max: float = 16.0                 # base radius upper bound (m) -- big chunks

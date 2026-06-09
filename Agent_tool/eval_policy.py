@@ -21,13 +21,19 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
     p.add_argument("--dynamics", choices=["simplified", "realistic"], default="simplified")
-    p.add_argument("--n-asteroids", type=int, default=60)
+    p.add_argument("--n-asteroids", type=int, default=135)
+    p.add_argument("--max-steps", type=int, default=2200)
+    p.add_argument("--exit-r", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                   help="override exit off-axis range for eval (default: env default)")
     p.add_argument("--episodes", type=int, default=100)
     p.add_argument("--seed", type=int, default=5000)
     args = p.parse_args()
 
     cfg = BeltConfig(n_asteroids=args.n_asteroids, seed=args.seed)
-    env = AsteroidBeltEnv(cfg=cfg, dynamics=args.dynamics, randomize_belt=True)
+    env = AsteroidBeltEnv(cfg=cfg, dynamics=args.dynamics, max_steps=args.max_steps,
+                          randomize_belt=True)
+    if args.exit_r is not None:
+        env.set_exit_r(args.exit_r[0], args.exit_r[1])
     model = PPO.load(args.model, device="cpu")
 
     outcomes, returns = {}, []

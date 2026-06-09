@@ -197,3 +197,83 @@
 - **加可见出口标记**：build_scene 加半透明绿球 `goal_marker`（无碰撞），reset 时移到随机出口（`model.geom_pos`），
   viewer 里能看到该飞到哪。
 - **整理本日志**：加顶部"现状速览 TL;DR"+ 把被 prepend 打乱的条目按时间顺序重排（内容保留，标注 v5–v14 的错误归因历程）。
+
+## 2026-06-08 — 新机器：发现 rebuild 分支未合并，ff 合入 main
+
+- 用户换新机器(i7-14700F/31G/RTX4070S)，clone 后只在 `main`(旧球体地基)上工作。
+- 我先误在旧 main 上做了"小行星带三维放大"(球体场 n=900 等)——**建在过时地基上，已全部 `git checkout` 丢弃**。
+- 用户目视 preview 发现"石头太小/全圆球/飞机朝向不对"，怀疑没 merge。**确认属实**：
+  真正的地基重建全在 `origin/rebuild/asteroid-belt-rl`(领先 main 7 commit)，从未合回 main。
+- merge base = main 的 HEAD → **fast-forward 合并，零冲突**。main 现含：幂律尺寸/土豆 mesh
+  外形+随机朝向/free-joint 漂移+自转/飞船 geom `quat` 朝向修正/160维全向雷达 obs/F8C 标定推力/
+  build-once 重置/G-load 惩罚/v15 best 模型(41%)。
+- 新机器仅有 `space-robotics-project` env(无文档所述 `asteroid-belt-runner`，技术栈相同)。
+  用它跑 `check_env`：obs=160，两种动力学通过，随机策略出现碰撞(石头够大够密，合理)。
+- **待办**：conda env 名与文档(`asteroid-belt-runner`)不一致，需统一(建新 env 或改文档)。
+
+## 2026-06-08 — 重建 conda 环境(asteroid-belt-runner)+ 渲染验证新场景
+
+- 用户要求建新环境 `asteroid-belt-runner`、删老的 `space-robotics-project`、并查看新场景。
+- **磁盘真相**：`/home` 是独立分区 `/dev/nvme1n1p4` **仅 117G 且 100% 满**(anaconda3 占 57G，
+  内含 myoassist×3/myosuite/RL-test/Human-exo 等 6-8G 环境)。`conda create --clone` 因
+  `No space left` 失败(需双份空间)，残留 6.1G 不完整残骸已删。
+- **改用 `mv` 改名**(瞬间、零额外空间)：`envs/space-robotics-project` → `envs/asteroid-belt-runner`。
+  conda 立即识别；`check_env` 用新环境名通过(obs=160，两动力学 OK)。
+- mv 副作用：`bin/` 下 29 个脚本 shebang 仍指旧路径，已 `sed` 批量修正(pip 等可直接用；
+  `conda run ... python` 本就不受影响)。环境名现与文档(CLAUDE.md)一致。
+- **新工具 `Agent_tool/render_scene.py`**：EGL 离屏渲染场景到 `images/scene_*.png`(overview/
+  ship_side/ship_top/downaxis)。两个渲染坑：①离屏 framebuffer 默认 640→设 `m.vis.global_.offwidth/height`；
+  ②大 extent 把 znear 推远导致近距特写全黑→设 `m.vis.map.znear=0.002`。
+- **目视确认用户三问题全解决**：小行星=不规则土豆 mesh+幂律尺寸(非小圆球)；动态散布在整个 YZ 圆截面
+  (3D 体积非细管)；飞船机头朝 +X、机翼沿 Y 对称无偏航(quat 修正生效)。
+
+## 2026-06-09 — 放大+大偏离 RL 攻坚:6 轮训练 + 根因诊断(冲撞局部最优,未训通)
+
+用户授权自主推进。把小行星带放大(600m×180m×135颗,密度不变)+ 出口偏离加大(exit_r 40-90→90-150),
+接 curriculum(密度+偏离同步爬)后正式训练。**结果:整套"最终架构"从未训通,根因是冲撞局部最优。**
+
+**训练/评估全记录(满难度评估,deterministic,100 集):**
+| run | 配置 | success | 失败分布 |
+|-----|------|---------|----------|
+| v16 | 原reward, 放大+大偏离 | 0% | 84%撞/16%oob |
+| v17 | reward修复(w_dist2→1,coll300→900,prox0.05→0.6,succ→400,oob→200,gr25→35) | 1% | 87%撞 |
+| v18 | 易curriculum(n5→90,exit0→150,ramp0.7,ent0.01,3M) | 1% | 67%撞/32%oob |
+| baseline | 原版难度n40/exit40-90/原reward,2M | 2% | 63%撞/35%oob;eval早期974→末期208退化 |
+| **v15历史模型@当前env** | — | **2%** | 70%撞/28%oob(README记41%/oob0%) |
+| stage1 | 我的reward, n80放大, **exit_r=0**(直线), 3M | **0%** | 68%撞/32%oob |
+
+**根因诊断:**
+- **action=0(飞船不动)→ 20/20 timeout**:env 无"强制撞"bug,停着安全。是策略**主动**冲撞。
+- 训练 eval reward 反复收敛到 **-297**;而"不动"≈-66。**PPO 学到比不动更差的策略**=典型**冲撞局部最优**:
+  progress 奖励在冲的过程中持续上升(稠密梯度),把策略推向"全速冲",越过避障悬崖撞墙。困在"冲"吸引盆。
+- **机动性充足**(fwd 103.5/lat 40 m/s²),非物理瓶颈。
+- **v15 的 41%(及 v4 的 100%)是 rebuild 早期、更简单架构(直线穿越、无 off-axis exit、不同 reward)的成绩。**
+  commit 654bdb3 引入"random off-axis exit + speed reward"后,当前"最终架构"(雷达 obs/F8C 推力/off-axis)
+  **搭好但 wrap-up 时从未训通**。README 的 41% 是过时架构的旧数据。
+
+**诊断 gap(诚实记录):** 未干净复现"原 reward + exit_r=0 + 原场景 n60"(最接近 v4/v15 可学配置)——
+stage1 的 exit_r=0 混入了我的 reward + 放大场景。**这应是后续攻坚第一步**,以区分"我的 reward 的锅"vs"env 回退"。
+
+**攻坚方案(留待后续):**
+1. 干净复现 v4/v15:原 reward + exit_r=0 + 原场景,确认早期可学性是否还在。
+2. 打破冲撞局部最优:**去 speed reward(w_speed=0)** + **限飞船最大速度**(冲太快没时间避障) +
+   **progress 稀疏化/封顶**(别沿途刷分) + **ent_coef↑**(跳出"冲"吸引盆)。
+3. 验证能打破后,阶梯加 off-axis exit(0→30→60→90→150)找"高通过率 vs 偏离"边界。
+
+**当前工作区状态(已保留,未 commit):** 放大+大偏离+reward rebalance+curriculum(密度&偏离)+
+render_scene.py + eval_policy(--exit-r/--max-steps) + preview 改进。logs/ 下 v16/v17/v18/baseline/s1 为
+诊断产物(git-ignored)。
+
+## 2026-06-09 — RL 攻坚(续):破"冲撞局部最优",net512 是关键,航程 curriculum 待训
+
+完整 ~25 轮实验见 `Agent_log/REWARD_EXPERIMENTS.md`(自主迭代台账)。要点:
+- **破解冲撞局部最优**:重设计 reward——去 speed reward(冲撞元凶)、closing 逼近惩罚做避障主力(只罚朝石头冲、
+  绕开不罚)、二次接近惩罚(窄 d_safe 不堵间隙)、anti-retreat(堵倒退逃跑)。
+- **真正瓶颈是网络容量,不是 reward**:reward/ent/VecNormalize 调了 20 轮卡 22%;**net512(512²)+4M 步直接到
+  极简 100%、n40 短航程 72%**。教训:学不会先怀疑网络容量/训练量,别死磕 reward。
+- **当前障碍=航程断崖**(航程 300→500 飞船恐惧倒退、0%):已实现**航程 curriculum**(`env.set_traverse` +
+  CurriculumCallback ramp goal 距离 + `--traverse`),冒烟验证 OK,**待正式训练**。
+- train_ppo 新增能力:`--net-width`(网络宽)、`--vecnorm`(reward 归一化 flag,默认关)、`--traverse`(航程 curriculum)、
+  curriculum 现 ramp 密度+偏离+航程三维。env 新增 reward 项:closing/proximity 拆分、arrival(关)、anti-retreat。
+- **env 默认是调试中间态**(goal_radius 60 放宽等);下次从 `REWARD_EXPERIMENTS.md` 末尾 "下次 TODO" 继续。
+- 训练产物 `logs/ppo_*`(git-ignored);最佳极简模型 `logs/ppo_diag_net512`(100%)。

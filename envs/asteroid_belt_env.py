@@ -59,25 +59,30 @@ class AsteroidBeltEnv(gym.Env):
         goal_clearance: float = 40.0,
         # random exit: each episode the goal is a point (goal_x, gy, gz) at a random off-axis
         # spot, so the ship must weave to a specific exit instead of flying straight down +X.
-        exit_r_min: float = 40.0,   # exit is sampled this far .. exit_r_max off the X axis (m)
-        exit_r_max: float = 90.0,
-        goal_radius: float = 25.0,  # success = reaching within this sphere of the goal point
+        exit_r_min: float = 90.0,   # exit is sampled this far .. exit_r_max off the X axis (m)
+        exit_r_max: float = 150.0,  #   (out toward the belt's 180 m rim -> forces real weaving)
+        goal_radius: float = 60.0,  # DIAG(temp): big sphere -- verify PPO can learn to reach at all
         randomize_belt: bool = True,
         render_mode: str = None,
         # reward weights
-        w_dist: float = 2.0,        # potential-based: reward for shrinking distance to goal point
-        w_speed: float = 0.02,      # reward velocity TOWARD the goal (fly fast, the right way)
-        w_heading: float = 0.05,    # small bonus for pointing the nose toward the goal
-        w_proximity: float = 0.05,  # SOFT hint to give asteroids room (collision is the hard stop);
-        d_safe: float = 10.0,       #   kept small so it never dominates forward progress
+        w_dist: float = 1.5,        # potential progress: strong goal pull through the field (coll raised to match)
+        w_speed: float = 0.0,       # OFF: speed reward keeps reviving the "ram" optimum; progress drives forward
+        w_heading: float = 0.15,    # back to 0.15 (0.3 over-rotated; isolating the oob-fix effect)
+        w_proximity: float = 6.0,   # avoidance: QUADRATIC penalty, but TIGHT so gaps stay passable
+        w_closing: float = 0.8,     # avoidance MAIN LINE: strong closing-speed penalty (vs fear-based coll)
+        d_safe: float = 15.0,       #   proximity radius -- < half a 55 m gap so threading isn't taxed
+        d_close: float = 60.0,      #   closing-penalty radius -- WIDE early warning vs ramming a rock
         w_spin: float = 0.01,       # penalty on |angular velocity| (keep attitude controllable)
         w_gload: float = 0.15,      # penalty on linear G-load above g_safe (keep the pilot alive)
         g_safe: float = 8.0,        # comfortable sustained acceleration (G); excess is penalized
         ctrl_cost: float = 0.001,
         time_cost: float = 0.03,    # per-step cost -> rewards finishing fast
-        collision_penalty: float = 300.0,
-        success_bonus: float = 200.0,
-        oob_penalty: float = 100.0,
+        collision_penalty: float = 600.0,   # lowered: 1200 made the ship FEAR forward motion -> retreat/stall
+        success_bonus: float = 600.0,       # raised: make a clean traversal clearly worth the risk
+        oob_penalty: float = 200.0,
+        w_arrive: float = 0.0,      # OFF: arrival brake hurt (22%->10%); control precision is the real issue
+        d_arrive: float = 120.0,    #   arrival-zone radius (m): start braking inside this goal distance
+        w_retreat: float = 2.0,     # anti-retreat: penalty per metre behind the start line (x<0) -> no fleeing
     ):
         super().__init__()
         self.base_cfg = cfg or BeltConfig()
@@ -107,7 +112,9 @@ class AsteroidBeltEnv(gym.Env):
         self.w_speed = w_speed
         self.w_heading = w_heading
         self.w_proximity = w_proximity
+        self.w_closing = w_closing
         self.d_safe = d_safe
+        self.d_close = d_close
         self.w_spin = w_spin
         self.w_gload = w_gload
         self.g_safe = g_safe
@@ -116,6 +123,9 @@ class AsteroidBeltEnv(gym.Env):
         self.collision_penalty = collision_penalty
         self.success_bonus = success_bonus
         self.oob_penalty = oob_penalty
+        self.w_arrive = w_arrive
+        self.d_arrive = d_arrive
+        self.w_retreat = w_retreat
 
         self.goal_x = self.base_cfg.belt_x_range[1] + goal_clearance
         self.goal = np.array([self.goal_x, 0.0, 0.0])   # (re)sampled each reset
@@ -229,6 +239,21 @@ class AsteroidBeltEnv(gym.Env):
             return np.inf
         d = np.linalg.norm(ast - self.ship_pos, axis=1) - r
         return float(d.min())
+
+    def _nearest_obstacle(self):
+        """Surface distance + closing speed to the single nearest active asteroid.
+        closing > 0 means the gap is shrinking (ship heading straight into the rock)."""
+        ast, r = self._active_slice()
+        if len(ast) == 0:
+            return np.inf, 0.0
+        rel = ast - self.ship_pos
+        d = np.maximum(np.linalg.norm(rel, axis=1), 1e-6)
+        surf = d - r
+        i = int(np.argmin(surf))
+        ship_v = self.data.qvel[self.qvel_adr:self.qvel_adr + 3]
+        rel_v = self._active_vel()[i] - ship_v
+        closing = float(-np.dot(rel[i], rel_v) / d[i])   # +ve => approaching that rock
+        return float(surf[i]), closing
 
     def _radar(self, R, pos, ship_v):
         """Body-frame full-sphere radar: per direction bin, the nearest obstacle.
@@ -361,6 +386,17 @@ class AsteroidBeltEnv(gym.Env):
         """Curriculum hook: change active belt density; takes effect on the next reset()."""
         self.n_active = int(np.clip(n, 0, self.n_total))
 
+    def set_exit_r(self, r_min, r_max):
+        """Curriculum hook: change the exit off-axis distance range (m); next reset() picks it up.
+        Ramping this up from near-0 lets the agent first learn to fly straight, then to weave."""
+        self.exit_r_min = float(r_min)
+        self.exit_r_max = float(max(r_max, r_min))
+
+    def set_traverse(self, x_far):
+        """Curriculum hook: set how far the ship must fly (goal X). Asteroids stay where they were
+        built (full belt); only the goal distance ramps -- short traverse first, then longer."""
+        self.goal_x = float(x_far) + self.goal_clearance
+
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
         if self.dynamics == "realistic":
@@ -401,10 +437,21 @@ class AsteroidBeltEnv(gym.Env):
         # small heading bonus: nose (body +X) pointing toward the goal
         fwd = self._rot()[:, 0]
         reward += self.w_heading * float(np.dot(fwd, goal_dir))
-        # proximity penalty: discourage hugging asteroid surfaces (learn to give them room)
-        nearest_surf = self._nearest_surface_dist()
-        if nearest_surf < self.d_safe:
-            reward -= self.w_proximity * (self.d_safe - max(nearest_surf, 0.0))
+        # avoidance: early + steep (quadratic) proximity penalty, plus a closing-speed penalty
+        # that directly punishes barreling toward a nearby rock -- this is what breaks the
+        # "ram straight through" optimum: heading fast at a near rock costs far more than the
+        # progress it buys, while weaving around it (closing -> 0) is cheap.
+        near_surf, near_closing = self._nearest_obstacle()
+        # closing penalty: WIDE early warning -- punish barreling toward a rock. Weaving past it
+        # (closing ~ 0, because the rock slides by laterally) is free, so this taxes "ram through"
+        # without taxing gap-threading.
+        if near_surf < self.d_close and near_closing > 0.0:
+            reward -= self.w_closing * near_closing * (1.0 - near_surf / self.d_close)
+        # proximity penalty: TIGHT + steep -- only when actually hugging a surface, so a ship
+        # centred in a 55 m gap (~14 m clearance) is NOT penalised for passing through.
+        if near_surf < self.d_safe:
+            prox = (self.d_safe - max(near_surf, 0.0)) / self.d_safe   # 0..1, 1 at contact
+            reward -= self.w_proximity * prox * prox                    # quadratic -> steep up close
         # spin penalty: keep attitude controllable so body-frame thrust stays useful
         w_local = self.data.qvel[self.qvel_adr + 3:self.qvel_adr + 6]
         reward -= self.w_spin * float(np.linalg.norm(w_local))
@@ -416,6 +463,15 @@ class AsteroidBeltEnv(gym.Env):
             reward -= self.w_gload * (g_load - self.g_safe)
         reward -= self.ctrl_cost * float(np.sum(action ** 2))
         reward -= self.time_cost
+        # arrival brake: once close to the goal, penalize speed so the ship slows to a stop INSIDE
+        # the success sphere instead of blasting straight through it (overshoot was 100% of failures).
+        if goal_dist < self.d_arrive:
+            speed = float(np.linalg.norm(v_world))
+            reward -= self.w_arrive * speed * (1.0 - goal_dist / self.d_arrive)
+        # anti-retreat: the lazy escape is fleeing backward off the start (x<0) until x<-50 OOB.
+        # Tax being behind the start line so retreating is never safer than pushing forward.
+        if x < 0.0:
+            reward -= self.w_retreat * (-x)
 
         terminated = False
         truncated = False
@@ -425,7 +481,7 @@ class AsteroidBeltEnv(gym.Env):
         oob = (
             x < -50.0
             or rho_yz > self.base_cfg.belt_yz_radius + self.oob_yz_margin
-            or x > self.goal_x + 30.0
+            or x > self.goal_x + 30.0   # tight far-bound doubles as a "don't overshoot" brake signal
         )
 
         if collided:

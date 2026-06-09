@@ -65,37 +65,60 @@ def main():
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
     from stable_baselines3.common.env_util import make_vec_env
-    from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 
     class CurriculumCallback(BaseCallback):
-        """Linearly ramp belt density from n_start to n_end over the first `ramp_frac` of training."""
+        """Ramp difficulty over the first `ramp_frac` of training, easy -> hard:
+        belt density n_start -> n_end, AND exit off-axis distance er_start -> er_end (each a
+        (min, max) pair). The agent first learns to fly straight through a sparse belt, then to
+        weave through a dense one to a far off-axis exit. Updates fire when the (discrete) density
+        steps; exit_r rides the same steps (fine-grained enough since n spans ~100 levels)."""
 
-        def __init__(self, total_timesteps, n_start, n_end, ramp_frac=0.6, verbose=0):
+        def __init__(self, total_timesteps, n_start, n_end, er_start, er_end,
+                     tx_start, tx_end, ramp_frac=0.6, verbose=0):
             super().__init__(verbose)
             self.total = total_timesteps
             self.n_start, self.n_end = n_start, n_end
+            self.er_start, self.er_end = er_start, er_end
+            self.tx_start, self.tx_end = tx_start, tx_end
             self.ramp_frac = ramp_frac
             self._cur = None
 
         def _on_step(self):
             frac = min(1.0, self.num_timesteps / (self.total * self.ramp_frac))
             n = int(round(self.n_start + frac * (self.n_end - self.n_start)))
+            er_min = self.er_start[0] + frac * (self.er_end[0] - self.er_start[0])
+            er_max = self.er_start[1] + frac * (self.er_end[1] - self.er_start[1])
+            tx = self.tx_start + frac * (self.tx_end - self.tx_start)
             if n != self._cur:
                 self.training_env.env_method("set_n_asteroids", n)
+                self.training_env.env_method("set_exit_r", er_min, er_max)
+                self.training_env.env_method("set_traverse", tx)
                 self._cur = n
                 if self.verbose:
-                    print(f"[curriculum] n_asteroids -> {n} at {self.num_timesteps} steps")
+                    print(f"[curriculum] n={n} exit_r=({er_min:.0f},{er_max:.0f}) traverse={tx:.0f} "
+                          f"at {self.num_timesteps} steps")
             return True
 
     p = argparse.ArgumentParser()
     p.add_argument("--timesteps", type=int, default=1_000_000)
-    p.add_argument("--n-envs", type=int, default=8)
-    p.add_argument("--n-asteroids", type=int, default=60)
+    p.add_argument("--n-envs", type=int, default=20)
+    p.add_argument("--n-asteroids", type=int, default=135)
     p.add_argument("--dynamics", choices=["simplified", "realistic"], default="simplified")
     p.add_argument("--curriculum", action="store_true",
-                   help="ramp belt density from --n-start up to --n-asteroids")
-    p.add_argument("--n-start", type=int, default=15, help="curriculum starting density")
-    p.add_argument("--max-steps", type=int, default=1500)
+                   help="ramp belt density + exit off-axis distance from easy to hard")
+    p.add_argument("--n-start", type=int, default=30, help="curriculum starting density")
+    p.add_argument("--exit-r-end", type=float, nargs=2, default=(90.0, 150.0),
+                   metavar=("MIN", "MAX"), help="curriculum target exit off-axis range (match env)")
+    p.add_argument("--ramp-frac", type=float, default=0.6,
+                   help="fraction of training over which curriculum ramps easy->hard")
+    p.add_argument("--ent-coef", type=float, default=0.0,
+                   help="PPO entropy bonus (raise to encourage exploration)")
+    p.add_argument("--net-width", type=int, default=256, help="MLP hidden width (both layers)")
+    p.add_argument("--traverse", type=float, nargs=2, default=None, metavar=("START", "END"),
+                   help="curriculum ramp of goal distance, e.g. 300 700 (default: no ramp, full traverse)")
+    p.add_argument("--vecnorm", action="store_true", help="wrap envs in VecNormalize (reward-scale norm)")
+    p.add_argument("--max-steps", type=int, default=2200)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--run-name", type=str, default="ppo_simplified")
     p.add_argument("--logdir", type=str, default="logs")
@@ -120,6 +143,8 @@ def main():
         # imports inside main() also keeps the forked workers torch/CUDA-free.
     )
     env = VecMonitor(env, filename=os.path.join(run_dir, "monitor"))
+    if args.vecnorm:
+        env = VecNormalize(env, norm_obs=False, norm_reward=True, gamma=0.995)  # reward-scale norm
 
     eval_env = make_vec_env(
         make_env_fn(args.n_asteroids, args.max_steps, args.seed + 1000, args.dynamics),
@@ -127,6 +152,9 @@ def main():
         seed=args.seed + 1000,
     )
     eval_env = VecMonitor(eval_env)
+    if args.vecnorm:
+        # must mirror the training env's wrapping; EvalCallback syncs the running stats into it.
+        eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False, gamma=0.995)
 
     # crash recovery: if --resume and a checkpoint exists, continue from the latest one
     ckpt_dir = os.path.join(run_dir, "checkpoints")
@@ -149,11 +177,11 @@ def main():
             batch_size=2048,
             gae_lambda=0.95,
             gamma=0.995,
-            ent_coef=0.0,
+            ent_coef=args.ent_coef,
             learning_rate=3e-4,
             clip_range=0.2,
             n_epochs=10,
-            policy_kwargs=dict(net_arch=[256, 256]),
+            policy_kwargs=dict(net_arch=[args.net_width, args.net_width]),
             verbose=1,
             tensorboard_log=run_dir,
             seed=args.seed,
@@ -175,8 +203,13 @@ def main():
         ),
     ]
     if args.curriculum:
+        tx_far = BeltConfig().belt_x_range[1]
+        tx_s, tx_e = tuple(args.traverse) if args.traverse else (tx_far, tx_far)
         callbacks.append(
-            CurriculumCallback(args.timesteps, args.n_start, args.n_asteroids, verbose=1)
+            CurriculumCallback(args.timesteps, args.n_start, args.n_asteroids,
+                               er_start=(0.0, 0.0), er_end=tuple(args.exit_r_end),
+                               tx_start=tx_s, tx_end=tx_e,
+                               ramp_frac=args.ramp_frac, verbose=1)
         )
 
     remaining = max(args.timesteps - done_steps, 0)

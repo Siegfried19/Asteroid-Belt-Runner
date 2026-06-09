@@ -68,6 +68,18 @@
 - **v3**（+proximity 惩罚 d_safe=12 / +spin 惩罚 / collision 100→300 / 课程 12→60）：训练中，待评估。
 - 课程学习已实现：`env.set_n_asteroids()` + `train CurriculumCallback`（`--curriculum --n-start N`）。
 
+### ⚠️ 2026-06-09 现状更正（off-axis exit 后从未训通）
+- 上面的 100%/41% 都是**早期"直线穿越"任务**（无 off-axis exit）的成绩。commit `654bdb3` 引入
+  **随机偏离出口 + speed reward** 后，当前"最终架构"（雷达 obs / F8C 推力 / off-axis）**从未训通**：
+  放大(600m×180m×135)+大偏离(exit_r 90-150)下 6 轮训练全 **0–2%**，连**偏离=0 也 0%**。
+- **根因：冲撞局部最优**——progress 奖励沿途刷分把策略推向"全速冲撞"，学到的策略比"不动"（安全超时，
+  ≈-66）还差（eval reward 反复收敛 **-297**）。机动性充足（fwd 103.5 / lat 40 m/s²），非物理瓶颈。
+  v15 模型在当前 env 只剩 **2%**。完整记录见 `Agent_log/CLAUDE_LOG.md` 2026-06-09。
+- **攻坚方案**：①干净复现"原 reward + exit_r=0 + 原场景"验证可学性是否还在；②打破冲撞局部最优
+  （去 speed reward / 限飞船最大速度 / progress 封顶 / ent_coef↑）；③阶梯加 off-axis 找"通过率 vs 偏离"边界。
+- **已落地可复用基础设施**：curriculum 支持密度+偏离同步爬（`--exit-r-end --ramp-frac --ent-coef`）；
+  `eval_policy --exit-r` 可指定偏离评估；`Agent_tool/render_scene.py` 离屏出图；场景已放大至 600m×180m。
+
 ### Phase 5 — 两套动力学的键盘飞控（Roadmap #4）
 - [ ] 扩展 `manual_controller.py`：在直接速度控制之外，增加力/推力模式，可切换
 - [ ] `main.py` 增加模式选择
