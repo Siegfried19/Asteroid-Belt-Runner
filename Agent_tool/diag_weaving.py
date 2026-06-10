@@ -100,8 +100,11 @@ def main():
         if mask.sum():
             print(f"  {label}: {mask.sum():3d} eps  success {100*succ[mask].mean():4.0f}%  "
                   f"mean max-lateral {lat[mask].mean():5.1f} m")
-    print(f"  successes' max-lateral: mean {lat[succ].mean():.1f} m, median {np.median(lat[succ]):.1f} m, "
-          f"max {lat[succ].max():.1f} m   (large => it weaves; small => it flies straight)")
+    if succ.any():
+        print(f"  successes' max-lateral: mean {lat[succ].mean():.1f} m, median {np.median(lat[succ]):.1f} m, "
+              f"max {lat[succ].max():.1f} m   (large => it weaves; small => it flies straight)")
+    else:
+        print("  successes' max-lateral: n/a (no successes in Part A)")
     print(f"  belt rim is {cfg.belt_yz_radius:.0f} m; ship can deviate up to ~"
           f"{cfg.belt_yz_radius + env.oob_yz_margin:.0f} m before OOB\n")
 

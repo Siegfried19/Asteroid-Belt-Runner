@@ -452,3 +452,37 @@ numpy corruption)、.gitignore(.belt_cache/)、rollout_viewer(+--exit-r)、日�
 - **新增 `Agent_tool/diag_weaving.py`**(上一段会话留下,本段沿用):量横向偏移 + 强制单障碍测避障。
 - **未 commit**:asteroid_belt_env(blocker+软上限默认关)、train_ppo(env_kwargs+blocker CLI+callback)、
   diag_weaving.py、CLAUDE.md/PROJECT_PLAN/本 log。**待用户发令:warm-start 63% + weaving curriculum 起训。**
+
+## 2026-06-09 — 全新 net + weaving curriculum 两轮全崩(0%/100% 倒退出界);根因锁死=逃跑比障碍便宜
+
+用户拍板"用新 net 从头训、先学避障、人不在帮跑"。后台子 agent 跑了 2 轮(预算内),均 TRAIN_COMPLETE,**双双崩**:
+- RUN1 `ppo_weave_fresh_0609`(8M,n30,blockers1→3,jitter40→0,ent0.05,net512,exit0):back half eval reward -5k~-8.5k。
+- RUN2 `ppo_weave_fresh2_0609`(更温和:n15,blockers1→2,jitter60→0,ramp0.8):eval 平在 ~-3170(卡死)。
+- **评估(n30/exit0,final+best 共4模型)全 0% success / 100% OOB / 0 碰撞**;63% 参照同 harness 复测 **68%**(管线无误)。
+- **关键纠偏(我亲自查 OOB 成因,子 agent 误判为"侧向逃")**:max-lateral 仅 9-17m(够不到侧向 205m)。
+  实测 20/20 = **`oob_retreat(x<-50)`**——飞船**一起步就倒退**到出界,根本不前进(终态 x≈-50,ryz≈10,speed 33-62)。
+- **根因(三连击同一个 bug)**:`oob_penalty 200 < collision_penalty 600`。guaranteed 正中 blocker 让"前进=必撞 -600",
+  fresh net 没学会绕→只能逃;**逃(倒退/侧飞出界 ≈ -200~-400)永远比撞(-600)便宜**→必逃。n80=侧向出界逃、
+  weave 课程=倒退逃,同一个病。`w_retreat=2/m` 都拦不住(逃的总代价仍 < 600)。jitter→0 正中=对称瘫痪,雪上加霜。
+- **fresh net 决策被证伪**:从零同时学"飞行+到目标+避障"在硬课程下直接塌成倒退。63% 模型复测 68%/0%OOB,
+  **是唯一稳定的前进基座**。
+- **修复方向(待用户裁定,task #7)**:① **抬 `oob_penalty` ≥ collision(让逃跑不再便宜)** = keystone;
+  ② **warm-start 63%**(逆转 fresh 决策,给前进基座再加避障);③ blocker jitter **永不归 0**(始终留明显可绕侧)。
+- **未动**:没起第 3 轮(逆转用户明确的 fresh 决策 + 改 reward,都该用户拍板);没改 reward 默认值;没 commit。
+  唯一工作树改动=子 agent 修的 `diag_weaving.py`(Part A 零成功时 `.max()` 空数组崩→加 guard,正确,保留)。
+- **基建注意**:RUN2 起步 3 秒内连崩 4 次 import segfault(烧 attempt 2-5)→ 12 次预算可能被快速消耗;
+  可给 `_warm_import` 加短 sleep 或调高 MAX_TRIES。崩溃产物在 git-ignored logs/(两个 collapsed model)。
+
+## 2026-06-09 — 换机器交接（commit+push 当前全部状态）
+
+换机器，把所有进度推到远端供新机继续。**新机 pull 后即可接着干。**
+- **会转移的**:全部代码(weaving curriculum/goal_mode/--init-from/软速度自学/diag_weaving 等)+ 主力基座
+  `models/ppo_traverse_n40_63pct.zip`(已 git-tracked)+ 全部 log/计划。
+- **不会转移的**:`logs/` 下的训练产物(git-ignored),包括两个崩掉的 weave run——无所谓,它们 0% 没用。
+- **下次从这继续(task #7,待用户拍板)**:根因已锁死=**逃跑比障碍便宜**(`oob_penalty 200 < collision 600`,
+  fresh net 退化成倒退出界)。推荐下一轮:①抬 `oob_penalty ≥ collision`;②**warm-start 63%**(fresh 已证伪,
+  需逆转"用新 net"决定);③blocker jitter 永不归 0(留可绕侧)。命令骨架:
+  `train_resilient.sh ppo_weave_warm_X 8000000 30 --init-from models/ppo_traverse_n40_63pct.zip
+   --curriculum --n-start 5 --n-blockers 2 --n-blockers-start 1 --blocker-jitter 15 --blocker-jitter-start 50
+   --net-width 512 --ent-coef 0.05 --exit-r-end 0 0`(+ 抬 oob_penalty:目前需改 env 默认或加 --oob-penalty flag)。
+- **基建待办**:`_warm_import` 加短 sleep / 调高 `MAX_TRIES`(RUN2 起步 3 秒连崩 4 次 import 烧重试预算)。
